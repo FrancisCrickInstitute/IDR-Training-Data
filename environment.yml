@@ -1,0 +1,10 @@
+name: omero
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - conda-forge::zeroc-ice==3.6.5
+  - python=3.9
+  - omero-py
+  - pip:
+      - imageio
