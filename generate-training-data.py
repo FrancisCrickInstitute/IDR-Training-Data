@@ -21,13 +21,24 @@ mixed_dir = parser.parse_args().mixed_dir
 source_dir = parser.parse_args().source_dir
 ground_truth_dir = parser.parse_args().ground_truth_dir
 
+from datetime import datetime
+
+
+def add_timestamp_to_print(input_string):
+    # Get the current date and time
+    current_time = datetime.now()
+    # Format the current time as a string
+    timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
+    # Concatenate the timestamp with the input string
+    print(f"{timestamp} {input_string}")
+
 
 def print_obj(obj, indent=0):
     """
     Helper method to display info about OMERO objects.
     Not all objects will have a "name" or owner field.
     """
-    print("""%s%s:%s  Name:"%s" (owner=%s)""" % (
+    add_timestamp_to_print("""%s%s:%s  Name:"%s" (owner=%s)""" % (
         " " * indent,
         obj.OMERO_CLASS,
         obj.getId(),
@@ -64,7 +75,7 @@ def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
 
     # Ensure dimensions are valid for loading
     if size_z < 1 or size_t < 1 or size_c < 1:
-        print(
+        add_timestamp_to_print(
             f"Warning: Image {image.getName()} has invalid dimensions (Z:{size_z}, C:{size_c}, T:{size_t}). Cannot load planes.")
         return None
 
@@ -74,7 +85,7 @@ def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
 
     s = "t:%s c:%s z:%s y:%s x:%s (selected t:%s z:%s)" % \
         (size_t, size_c, size_z, size_y, size_x, selected_t_timepoint, selected_z_plane)
-    print(s)
+    add_timestamp_to_print(s)
 
     # --- Determine Cropping Dimensions and Start Points ---
     # Ensure cropped dimensions don't exceed original dimensions
@@ -87,7 +98,7 @@ def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
 
     # --- Efficiently Load Only the Cropped Region ---
     loaded_planes = []
-    print(
+    add_timestamp_to_print(
         f"Downloading image {image.getName()} (cropped region: X={start_x}-{start_x + cropped_size_x}, Y={start_y}-{start_y + cropped_size_y})")
     try:
         for c in range(size_c):
@@ -107,7 +118,7 @@ def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
         all_channels_cropped_data = np.stack(loaded_planes)
 
     except Exception as e:
-        print(f"Error loading cropped planes for image {image.getName()}: {e}")
+        add_timestamp_to_print(f"Error loading cropped planes for image {image.getName()}: {e}")
         return None
 
     # Reshape to (1, size_c, 1, cropped_size_y, cropped_size_x)
@@ -122,13 +133,13 @@ def save_images(image: np.ndarray, filename: str):
     """
     # Imageio can handle float32 directly for TIFF.
     iio.imwrite(filename, image, extension='.tif')
-    print(f"Saved {filename}")
+    add_timestamp_to_print(f"Saved {filename}")
 
 
 def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel: np.ndarray,
                             crosstalk_coefficient: float) -> tuple[np.ndarray, np.ndarray]:
     if not (0.0 <= crosstalk_coefficient <= 1.0):
-        print("Warning: Crosstalk coefficient is typically between 0 and 1.")
+        add_timestamp_to_print("Warning: Crosstalk coefficient is typically between 0 and 1.")
 
     if pure_target_channel.shape != pure_source_channel.shape:
         raise ValueError("Pure target and source channel images must have the same shape.")
@@ -150,10 +161,16 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
 
 
 HOST = 'ws://idr.openmicroscopy.org/omero-ws'
+add_timestamp_to_print(f'Attempting to connect to {HOST}')
 conn = BlitzGateway('public', 'public', host=HOST, secure=True)
-print(conn.connect())
+if (conn.connect()):
+    add_timestamp_to_print(f'Connected to {HOST}')
+else:
+    add_timestamp_to_print(f'Failed to connect to {HOST}')
+    exit(1)
 conn.c.enableKeepAlive(60)
 
+add_timestamp_to_print(f'Getting project list from {HOST}')
 projects = list(conn.getObjects("Project"))
 
 # Define the attribute and the value you're looking for
@@ -165,7 +182,7 @@ foundProject = False
 
 while not foundProject:
     random_project = random.choice(projects)
-    print(f'Checking project {random_project.getName()}')
+    add_timestamp_to_print(f'Checking project {random_project.getName()}')
     kv_annotations = random_project.listAnnotations()  # or specific namespace if known
     for annotation in kv_annotations:
         if hasattr(annotation, 'getMapValue'):  # check if it's a MapAnnotation
@@ -173,7 +190,7 @@ while not foundProject:
                 key = key_value_pair.name
                 value = key_value_pair.value
                 if key == attribute_name:
-                    print(f'{key}: {value}')
+                    add_timestamp_to_print(f'{key}: {value}')
                     if any(term.lower() in value.lower() for term in search_terms):
                         datasets = list(random_project.listChildren())
                         random_dataset = random.choice(datasets)
@@ -196,8 +213,8 @@ if data is not None:
     while source_channel == target_channel:
         target_channel = random.choice(range(np.size(data[0], 0)))
 
-    print(f'Source Channel: {source_channel}')
-    print(f'Target Channel: {target_channel}')
+    add_timestamp_to_print(f'Source Channel: {source_channel}')
+    add_timestamp_to_print(f'Target Channel: {target_channel}')
 
     # Define a set of crosstalk coefficients to generate diverse data
     crosstalk_coefficients = [0.0, random.random() * max_crosstalk]  # Include no crosstalk (0.0)
@@ -217,12 +234,12 @@ if data is not None:
 
         # Save the generated images
         save_images(mixed_image, mixed_filename)
-        print(f'Generated and saved {mixed_filename} in {mixed_dir}')
+        add_timestamp_to_print(f'Generated and saved {mixed_filename} in {mixed_dir}')
         save_images(true_crosstalk_map, ground_truth_filename)
-        print(f'Generated and saved {ground_truth_filename} in {ground_truth_dir}')
+        add_timestamp_to_print(f'Generated and saved {ground_truth_filename} in {ground_truth_dir}')
         save_images(data[0, source_channel, 0], source_filename)
-        print(f'Generated and saved {source_filename} in {source_dir}')
+        add_timestamp_to_print(f'Generated and saved {source_filename} in {source_dir}')
 else:
-    print("No image has been loaded - something has gone wrong somewhere!")
+    add_timestamp_to_print("No image has been loaded - something has gone wrong somewhere!")
 
 conn.close()
