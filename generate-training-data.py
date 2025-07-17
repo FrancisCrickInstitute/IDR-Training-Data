@@ -14,12 +14,16 @@ parser.add_argument('-b', '--mixed_dir', help='Directory to save generated "blee
 parser.add_argument('-s', '--source_dir', help='Directory to save original "source" channel')
 parser.add_argument('-g', '--ground_truth_dir',
                     help='Directory to save "ground truth" images showing extent of bleed-through')
+parser.add_argument('-n', '--number_of_images',
+                    help='Number of image sets to generate',
+                    type=int, default=1)
 parser.parse_args()
 
 max_crosstalk = parser.parse_args().max_crosstalk
 mixed_dir = parser.parse_args().mixed_dir
 source_dir = parser.parse_args().source_dir
 ground_truth_dir = parser.parse_args().ground_truth_dir
+n_images = parser.parse_args().number_of_images
 
 
 def print_obj(obj, indent=0):
@@ -161,68 +165,70 @@ attribute_name = "Imaging Method"
 # Define your search terms as a list
 search_terms = ["fluorescence", "confocal"]
 
-foundProject = False
+for i in range(n_images):
+    print(f'Obtaining image set {i} of {n_images}')
+    foundProject = False
 
-while not foundProject:
-    random_project = random.choice(projects)
-    print(f'Checking project {random_project.getName()}')
-    kv_annotations = random_project.listAnnotations()  # or specific namespace if known
-    for annotation in kv_annotations:
-        if hasattr(annotation, 'getMapValue'):  # check if it's a MapAnnotation
-            for key_value_pair in annotation.getMapValue():
-                key = key_value_pair.name
-                value = key_value_pair.value
-                if key == attribute_name:
-                    print(f'{key}: {value}')
-                    if any(term.lower() in value.lower() for term in search_terms):
-                        datasets = list(random_project.listChildren())
-                        random_dataset = random.choice(datasets)
-                        images = list(random_dataset.listChildren())
-                        random_image = random.choice(images)
-                        if random_image.getPrimaryPixels().getSizeC() > 1:
-                            foundProject = True
-                            break
+    while not foundProject:
+        random_project = random.choice(projects)
+        print(f'Checking project {random_project.getName()}')
+        kv_annotations = random_project.listAnnotations()  # or specific namespace if known
+        for annotation in kv_annotations:
+            if hasattr(annotation, 'getMapValue'):  # check if it's a MapAnnotation
+                for key_value_pair in annotation.getMapValue():
+                    key = key_value_pair.name
+                    value = key_value_pair.value
+                    if key == attribute_name:
+                        print(f'{key}: {value}')
+                        if any(term.lower() in value.lower() for term in search_terms):
+                            datasets = list(random_project.listChildren())
+                            random_dataset = random.choice(datasets)
+                            images = list(random_dataset.listChildren())
+                            random_image = random.choice(images)
+                            if random_image.getPrimaryPixels().getSizeC() > 1:
+                                foundProject = True
+                                break
 
-print_obj(random_project)
-print_obj(random_dataset)
-print_obj(random_image)
+    print_obj(random_project)
+    print_obj(random_dataset)
+    print_obj(random_image)
 
-data = load_numpy_array(random_image)
+    data = load_numpy_array(random_image)
 
-if data is not None:
-    source_channel = random.choice(range(np.size(data[0], 0)))
-    target_channel = source_channel
+    if data is not None:
+        source_channel = random.choice(range(np.size(data[0], 0)))
+        target_channel = source_channel
 
-    while source_channel == target_channel:
-        target_channel = random.choice(range(np.size(data[0], 0)))
+        while source_channel == target_channel:
+            target_channel = random.choice(range(np.size(data[0], 0)))
 
-    print(f'Source Channel: {source_channel}')
-    print(f'Target Channel: {target_channel}')
+        print(f'Source Channel: {source_channel}')
+        print(f'Target Channel: {target_channel}')
 
-    # Define a set of crosstalk coefficients to generate diverse data
-    crosstalk_coefficients = [0.0, random.random() * max_crosstalk]  # Include no crosstalk (0.0)
+        # Define a set of crosstalk coefficients to generate diverse data
+        crosstalk_coefficients = [0.0, random.random() * max_crosstalk]  # Include no crosstalk (0.0)
 
-    for i, alpha in enumerate(crosstalk_coefficients):
-        mixed_image, true_crosstalk_map = generate_crosstalk_data(
-            pure_target_channel=data[0, target_channel, 0],
-            pure_source_channel=data[0, source_channel, 0],
-            crosstalk_coefficient=alpha
-        )
+        for i, alpha in enumerate(crosstalk_coefficients):
+            mixed_image, true_crosstalk_map = generate_crosstalk_data(
+                pure_target_channel=data[0, target_channel, 0],
+                pure_source_channel=data[0, source_channel, 0],
+                crosstalk_coefficient=alpha
+            )
 
-        # Generate unique filenames
-        mixed_filename = os.path.join(mixed_dir, f"image_{random_image.getId()}_alpha_{alpha:.2f}_mixed.tif")
-        ground_truth_filename = os.path.join(ground_truth_dir,
-                                             f"image_{random_image.getId()}_alpha_{alpha:.2f}_ground_truth.tif")
-        source_filename = os.path.join(source_dir, f"image_{random_image.getId()}_alpha_{alpha:.2f}_source.tif")
+            # Generate unique filenames
+            mixed_filename = os.path.join(mixed_dir, f"image_{random_image.getId()}_alpha_{alpha:.2f}_mixed.tif")
+            ground_truth_filename = os.path.join(ground_truth_dir,
+                                                 f"image_{random_image.getId()}_alpha_{alpha:.2f}_ground_truth.tif")
+            source_filename = os.path.join(source_dir, f"image_{random_image.getId()}_alpha_{alpha:.2f}_source.tif")
 
-        # Save the generated images
-        save_images(mixed_image, mixed_filename)
-        print(f'Generated and saved {mixed_filename} in {mixed_dir}')
-        save_images(true_crosstalk_map, ground_truth_filename)
-        print(f'Generated and saved {ground_truth_filename} in {ground_truth_dir}')
-        save_images(data[0, source_channel, 0], source_filename)
-        print(f'Generated and saved {source_filename} in {source_dir}')
-else:
-    print("No image has been loaded - something has gone wrong somewhere!")
+            # Save the generated images
+            save_images(mixed_image, mixed_filename)
+            print(f'Generated and saved {mixed_filename} in {mixed_dir}')
+            save_images(true_crosstalk_map, ground_truth_filename)
+            print(f'Generated and saved {ground_truth_filename} in {ground_truth_dir}')
+            save_images(data[0, source_channel, 0], source_filename)
+            print(f'Generated and saved {source_filename} in {source_dir}')
+    else:
+        print("No image has been loaded - something has gone wrong somewhere!")
 
 conn.close()
