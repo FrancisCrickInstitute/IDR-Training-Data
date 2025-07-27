@@ -1,10 +1,12 @@
 import argparse
-import os
-import random
-
 import imageio.v3 as iio  # Using imageio v3 for modern API
 import numpy as np
+import os
+import random
 from omero.gateway import BlitzGateway
+
+MIN_SIZE = 256
+NORM_COEFF = np.pow(2, 16)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-c', '--max_crosstalk',
@@ -148,9 +150,9 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
     mixed_target_channel = pure_target_channel + bleed_through_signal
 
     # The ground truth crosstalk map is simply the bleed-through signal itself
-    ground_truth_crosstalk_map = bleed_through_signal
+    ground_truth_crosstalk_map = bleed_through_signal / np.percentile(pure_target_channel, 99)
 
-    return mixed_target_channel, ground_truth_crosstalk_map
+    return mixed_target_channel / NORM_COEFF, ground_truth_crosstalk_map
 
 
 HOST = 'ws://idr.openmicroscopy.org/omero-ws'
@@ -185,7 +187,7 @@ for i in range(n_images):
                             random_dataset = random.choice(datasets)
                             images = list(random_dataset.listChildren())
                             random_image = random.choice(images)
-                            if random_image.getPrimaryPixels().getSizeC() > 1:
+                            if random_image.getPrimaryPixels().getSizeC() > 1 and random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and random_image.getPrimaryPixels().getSizeY() > MIN_SIZE:
                                 foundProject = True
                                 break
 
