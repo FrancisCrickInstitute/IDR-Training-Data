@@ -161,10 +161,7 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
     # Generate the mixed target channel image
     mixed_target_channel = pure_target_channel + bleed_through_signal
 
-    # The ground truth crosstalk map is simply the bleed-through signal itself
-    ground_truth_crosstalk_map = bleed_through_signal / np.percentile(pure_source_channel, 99.9)
-
-    return mixed_target_channel / NORM_COEFF, ground_truth_crosstalk_map
+    return mixed_target_channel / NORM_COEFF, bleed_through_signal / NORM_COEFF
 
 
 HOST = 'ws://idr.openmicroscopy.org/omero-ws'
