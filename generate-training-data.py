@@ -1,12 +1,14 @@
 import argparse
-import imageio.v3 as iio  # Using imageio v3 for modern API
-import numpy as np
 import os
 import random
+
+import imageio.v3 as iio  # Using imageio v3 for modern API
+import numpy as np
 from omero.gateway import BlitzGateway
+from skimage.transform import resize
 
 MIN_SIZE = 256
-NORM_COEFF = np.pow(2, 16)
+NORM_COEFF = np.power(2, 16)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-c', '--max_crosstalk',
@@ -121,11 +123,21 @@ def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
     return np.reshape(all_channels_cropped_data, newshape=final_shape)
 
 
-def save_images(image: np.ndarray, filename: str):
+def save_images(image: np.ndarray, filename: str, new_shape=None):
     """
     Saves a NumPy array as a TIFF image.
+    Resizes the image if new_shape is specified.
     Handles appropriate data type conversion for saving.
+
+    Parameters:
+    - image: NumPy array representing the image.
+    - filename: String representing the filename to save the image as.
+    - new_shape: Tuple representing the new shape (height, width) for the image.
     """
+    if new_shape is not None:
+        # Resize the image with interpolation
+        image = resize(image, new_shape, preserve_range=True)
+
     # Imageio can handle float32 directly for TIFF.
     iio.imwrite(filename, image, extension='.tif')
     print(f"Saved {filename}")
@@ -150,7 +162,7 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
     mixed_target_channel = pure_target_channel + bleed_through_signal
 
     # The ground truth crosstalk map is simply the bleed-through signal itself
-    ground_truth_crosstalk_map = bleed_through_signal / np.percentile(pure_target_channel, 99)
+    ground_truth_crosstalk_map = bleed_through_signal / np.percentile(pure_source_channel, 99.9)
 
     return mixed_target_channel / NORM_COEFF, ground_truth_crosstalk_map
 
@@ -224,11 +236,11 @@ for i in range(n_images):
             source_filename = os.path.join(source_dir, f"image_{random_image.getId()}_alpha_{alpha:.2f}_source.tif")
 
             # Save the generated images
-            save_images(mixed_image, mixed_filename)
+            save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
             print(f'Generated and saved {mixed_filename} in {mixed_dir}')
-            save_images(true_crosstalk_map, ground_truth_filename)
+            save_images(true_crosstalk_map, ground_truth_filename, new_shape=[MIN_SIZE, MIN_SIZE])
             print(f'Generated and saved {ground_truth_filename} in {ground_truth_dir}')
-            save_images(data[0, source_channel, 0], source_filename)
+            save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename, new_shape=[MIN_SIZE, MIN_SIZE])
             print(f'Generated and saved {source_filename} in {source_dir}')
     else:
         print("No image has been loaded - something has gone wrong somewhere!")
