@@ -144,7 +144,7 @@ def save_images(image: np.ndarray, filename: str, new_shape=None):
 
 
 def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel: np.ndarray,
-                            crosstalk_coefficient: float) -> tuple[np.ndarray, np.ndarray]:
+                            crosstalk_coefficient: float) -> tuple[np.ndarray, float]:
     if not (0.0 <= crosstalk_coefficient <= 1.0):
         print("Warning: Crosstalk coefficient is typically between 0 and 1.")
 
@@ -161,7 +161,23 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
     # Generate the mixed target channel image
     mixed_target_channel = pure_target_channel + bleed_through_signal
 
-    return mixed_target_channel / NORM_COEFF, bleed_through_signal / NORM_COEFF
+    # Rescale the entire image based on its actual min/max
+    current_max = np.max(mixed_target_channel)
+
+    if current_max == 0:  # Handle uniform image to avoid division by zero
+        normalized_mixed_target_channel = np.zeros_like(mixed_target_channel)
+    else:
+        # Scale to 0 to NORM_COEFF range
+        normalized_mixed_target_channel = mixed_target_channel * NORM_COEFF / current_max
+
+    sum_mixed_target_channel = float(np.sum(mixed_target_channel))
+
+    if sum_mixed_target_channel > 0.0:
+        bleedthrough_proportion = float(np.sum(bleed_through_signal)) / sum_mixed_target_channel
+    else:
+        bleedthrough_proportion = 0.0
+
+    return normalized_mixed_target_channel / NORM_COEFF, bleedthrough_proportion  # Assuming you still want 0-1 float output
 
 
 HOST = 'ws://idr.openmicroscopy.org/omero-ws'
@@ -176,8 +192,8 @@ attribute_name = "Imaging Method"
 # Define your search terms as a list
 search_terms = ["fluorescence", "confocal"]
 
-for i in range(n_images):
-    print(f'Obtaining image set {i} of {n_images}')
+for j in range(n_images):
+    print(f'Obtaining image set {j} of {n_images}')
     foundProject = False
 
     while not foundProject:
@@ -217,26 +233,24 @@ for i in range(n_images):
         print(f'Target Channel: {target_channel}')
 
         # Define a set of crosstalk coefficients to generate diverse data
-        crosstalk_coefficients = [0.0, random.random() * max_crosstalk]  # Include no crosstalk (0.0)
+        crosstalk_coefficients = [random.random() * max_crosstalk]  # Include no crosstalk (0.0)
 
-        for i, alpha in enumerate(crosstalk_coefficients):
-            mixed_image, true_crosstalk_map = generate_crosstalk_data(
+        for j, alpha in enumerate(crosstalk_coefficients):
+            mixed_image, crosstalk_proportion = generate_crosstalk_data(
                 pure_target_channel=data[0, target_channel, 0],
                 pure_source_channel=data[0, source_channel, 0],
                 crosstalk_coefficient=alpha
             )
 
             # Generate unique filenames
-            mixed_filename = os.path.join(mixed_dir, f"image_{random_image.getId()}_alpha_{alpha:.2f}_mixed.tif")
-            ground_truth_filename = os.path.join(ground_truth_dir,
-                                                 f"image_{random_image.getId()}_alpha_{alpha:.2f}_ground_truth.tif")
-            source_filename = os.path.join(source_dir, f"image_{random_image.getId()}_alpha_{alpha:.2f}_source.tif")
+            mixed_filename = os.path.join(mixed_dir,
+                                          f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
+            source_filename = os.path.join(source_dir,
+                                           f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
 
             # Save the generated images
             save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
             print(f'Generated and saved {mixed_filename} in {mixed_dir}')
-            save_images(true_crosstalk_map, ground_truth_filename, new_shape=[MIN_SIZE, MIN_SIZE])
-            print(f'Generated and saved {ground_truth_filename} in {ground_truth_dir}')
             save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename, new_shape=[MIN_SIZE, MIN_SIZE])
             print(f'Generated and saved {source_filename} in {source_dir}')
     else:
