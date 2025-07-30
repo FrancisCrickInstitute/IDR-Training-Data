@@ -155,8 +155,13 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
     pure_target_channel = pure_target_channel.astype(np.float64)
     pure_source_channel = pure_source_channel.astype(np.float64)
 
+    target_sum = float(np.sum(pure_target_channel))
+    source_sum = float(np.sum(pure_source_channel))
+
+    alpha = (crosstalk_coefficient * target_sum) / (source_sum * (1.0 - crosstalk_coefficient))
+
     # Calculate the bleed-through signal
-    bleed_through_signal = crosstalk_coefficient * pure_source_channel
+    bleed_through_signal = alpha * pure_source_channel
 
     # Generate the mixed target channel image
     mixed_target_channel = pure_target_channel + bleed_through_signal
@@ -192,6 +197,9 @@ attribute_name = "Imaging Method"
 # Define your search terms as a list
 search_terms = ["fluorescence", "confocal"]
 
+# Set to keep track of processed image IDs
+processed_image_ids = set()
+
 for j in range(n_images):
     print(f'Obtaining image set {j} of {n_images}')
     foundProject = False
@@ -212,8 +220,12 @@ for j in range(n_images):
                             random_dataset = random.choice(datasets)
                             images = list(random_dataset.listChildren())
                             random_image = random.choice(images)
-                            if random_image.getPrimaryPixels().getSizeC() > 1 and random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and random_image.getPrimaryPixels().getSizeY() > MIN_SIZE:
+                            if (random_image.getId() not in processed_image_ids and
+                                    random_image.getPrimaryPixels().getSizeC() > 1 and
+                                    random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and
+                                    random_image.getPrimaryPixels().getSizeY() > MIN_SIZE):
                                 foundProject = True
+                                processed_image_ids.add(random_image.getId())
                                 break
 
     print_obj(random_project)
