@@ -155,8 +155,17 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
     pure_target_channel = pure_target_channel.astype(np.float64)
     pure_source_channel = pure_source_channel.astype(np.float64)
 
+    sum_pure_target_channel = float(np.sum(pure_target_channel))
+    sum_pure_source_channel = float(np.sum(pure_source_channel))
+
+    if not sum_pure_source_channel > 0.0:
+        return None, 0.0
+
+    alpha = (crosstalk_coefficient * sum_pure_target_channel) / (
+                sum_pure_source_channel * (1.0 - crosstalk_coefficient))
+
     # Calculate the bleed-through signal
-    bleed_through_signal = crosstalk_coefficient * pure_source_channel
+    bleed_through_signal = alpha * pure_source_channel
 
     # Generate the mixed target channel image
     mixed_target_channel = pure_target_channel + bleed_through_signal
@@ -242,16 +251,17 @@ for j in range(n_images):
                 crosstalk_coefficient=alpha
             )
 
-            # Generate unique filenames
-            mixed_filename = os.path.join(mixed_dir,
-                                          f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
-            source_filename = os.path.join(source_dir,
-                                           f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
+            if mixed_image is not None:
+                # Generate unique filenames
+                mixed_filename = os.path.join(mixed_dir,
+                                              f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
+                source_filename = os.path.join(source_dir,
+                                               f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
 
-            # Save the generated images
-            save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
-            print(f'Generated and saved {mixed_filename} in {mixed_dir}')
-            save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename, new_shape=[MIN_SIZE, MIN_SIZE])
+                # Save the generated images
+                save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
+                print(f'Generated and saved {mixed_filename} in {mixed_dir}')
+                save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename, new_shape=[MIN_SIZE, MIN_SIZE])
             print(f'Generated and saved {source_filename} in {source_dir}')
     else:
         print("No image has been loaded - something has gone wrong somewhere!")
