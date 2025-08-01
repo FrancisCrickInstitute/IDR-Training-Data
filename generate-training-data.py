@@ -112,6 +112,8 @@ HOST = 'ws://idr.openmicroscopy.org/omero-ws'
 USER = 'public'
 PASS = 'public'
 
+MAX_RETRIES = 100
+
 
 def find_random_project_image(conn):
     """
@@ -122,10 +124,12 @@ def find_random_project_image(conn):
     attribute_name = "Imaging Method"
     search_terms = ["fluorescence", "confocal"]
 
-    foundProject = False
-    while not foundProject:
+    retry_count = 0
+    while retry_count < MAX_RETRIES:
+        retry_count += 1
         random_project = random.choice(projects)
         kv_annotations = random_project.listAnnotations()
+        found_imaging_method = False
         for annotation in kv_annotations:
             if hasattr(annotation, 'getMapValue'):
                 for key_value_pair in annotation.getMapValue():
@@ -133,15 +137,32 @@ def find_random_project_image(conn):
                     value = key_value_pair.value
                     if key == attribute_name:
                         if any(term.lower() in value.lower() for term in search_terms):
-                            datasets = list(random_project.listChildren())
-                            random_dataset = random.choice(datasets)
-                            images = list(random_dataset.listChildren())
-                            random_image = random.choice(images)
-                            if (random_image.getPrimaryPixels().getSizeC() > 1 and
-                                    random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and
-                                    random_image.getPrimaryPixels().getSizeY() > MIN_SIZE):
-                                foundProject = True
-                                return random_project, random_dataset, random_image
+                            found_imaging_method = True
+                            break
+            if found_imaging_method:
+                break
+
+        if not found_imaging_method:
+            continue
+
+        datasets = list(random_project.listChildren())
+        if not datasets:
+            logging.warning(f"No datasets found in project '{random_project.getName()}'. Retrying...")
+            continue
+        random_dataset = random.choice(datasets)
+        images = list(random_dataset.listChildren())
+        if not images:
+            logging.warning(f"No images found in dataset '{random_dataset.getName()}'. Retrying...")
+            continue
+        random_image = random.choice(images)
+
+        if (random_image.getPrimaryPixels().getSizeC() > 1 and
+                random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and
+                random_image.getPrimaryPixels().getSizeY() > MIN_SIZE):
+            logging.info(f"Successfully found a suitable image in Project hierarchy after {retry_count} attempts.")
+            return random_project, random_dataset, random_image
+
+    logging.error(f"Failed to find a suitable Project image after {MAX_RETRIES} attempts.")
     return None, None, None
 
 
@@ -152,38 +173,36 @@ def find_random_screen_image(conn):
     """
     screens = list(conn.getObjects("Screen"))
     if not screens:
-        logging.warning("No screens found on the server.")
+        logging.error("No screens found on the server.")
         return None, None, None, None
 
-    random_screen = random.choice(screens)
-    plates = list(random_screen.listChildren())
-    if not plates:
-        logging.warning(f"No plates found in screen '{random_screen.getName()}'")
-        return None, None, None, None
+    retry_count = 0
+    while retry_count < MAX_RETRIES:
+        retry_count += 1
+        random_screen = random.choice(screens)
+        plates = list(random_screen.listChildren())
+        if not plates:
+            logging.warning(f"No plates found in screen '{random_screen.getName()}'. Retrying...")
+            continue
+        random_plate = random.choice(plates)
+        wells = list(random_plate.listChildren())
+        if not wells:
+            logging.warning(f"No wells found in plate '{random_plate.getName()}'. Retrying...")
+            continue
+        random_well = random.choice(wells)
+        images = list(random_well.listChildren())
+        if not images:
+            logging.warning(f"No images found in well '{random_well.getRow()}{random_well.getColumn()}'. Retrying...")
+            continue
 
-    random_plate = random.choice(plates)
-    wells = list(random_plate.listChildren())
-    if not wells:
-        logging.warning(f"No wells found in plate '{random_plate.getName()}'")
-        return None, None, None, None
-
-    random_well = random.choice(wells)
-    images = list(random_well.listChildren())
-    if not images:
-        logging.warning(f"No images found in well '{random_well.getRow()}{random_well.getColumn()}'")
-        return None, None, None, None
-
-    # The rest of the logic is similar to the project hierarchy,
-    # ensuring the image meets the criteria.
-    foundImage = False
-    while not foundImage:
         random_image = random.choice(images).getImage()
         if (random_image.getPrimaryPixels().getSizeC() > 1 and
                 random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and
                 random_image.getPrimaryPixels().getSizeY() > MIN_SIZE):
-            foundImage = True
+            logging.info(f"Successfully found a suitable image in Screen hierarchy after {retry_count} attempts.")
             return random_screen, random_plate, random_well, random_image
 
+    logging.error(f"Failed to find a suitable Screen image after {MAX_RETRIES} attempts.")
     return None, None, None, None
 
 
@@ -285,18 +304,19 @@ if __name__ == '__main__':
     print(f"Detailed logs are being written to {args.log_file}")
     start_time = time.time()
 
-    num_workers = min(args.number_of_images, os.cpu_count() * 4)
+    # num_workers = min(args.number_of_images, os.cpu_count() * 4)
+    num_workers = 1
     images_per_worker = args.number_of_images // num_workers
     remainder = args.number_of_images % num_workers
     work_items = [images_per_worker] * num_workers
     for i in range(remainder):
         work_items[i] += 1
 
-    logging.info(f"Total images to generate: {args.number_of_images}")
-    logging.info(f"Number of workers: {num_workers}")
-    logging.info(f"Work distribution: {work_items}")
+    print(f"Total images to generate: {args.number_of_images}")
+    print(f"Number of workers: {num_workers}")
+    print(f"Work distribution: {work_items}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(worker_task, args, count) for count in work_items]
 
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing images"):
