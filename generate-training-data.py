@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import os
 import random
 
@@ -9,25 +10,6 @@ from skimage.transform import resize
 
 MIN_SIZE = 256
 NORM_COEFF = np.power(2, 16)
-
-parser = argparse.ArgumentParser()
-parser.add_argument('-c', '--max_crosstalk',
-                    help='Maximum relative crosstalk applied from source channel to bleed channel',
-                    type=float, default=0.5)
-parser.add_argument('-b', '--mixed_dir', help='Directory to save generated "bleed-through" images')
-parser.add_argument('-s', '--source_dir', help='Directory to save original "source" channel')
-parser.add_argument('-g', '--ground_truth_dir',
-                    help='Directory to save "ground truth" images showing extent of bleed-through')
-parser.add_argument('-n', '--number_of_images',
-                    help='Number of image sets to generate',
-                    type=int, default=1)
-parser.parse_args()
-
-max_crosstalk = parser.parse_args().max_crosstalk
-mixed_dir = parser.parse_args().mixed_dir
-source_dir = parser.parse_args().source_dir
-ground_truth_dir = parser.parse_args().ground_truth_dir
-n_images = parser.parse_args().number_of_images
 
 
 def print_obj(obj, indent=0):
@@ -162,7 +144,7 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
         return None, 0.0
 
     alpha = (crosstalk_coefficient * sum_pure_target_channel) / (
-                sum_pure_source_channel * (1.0 - crosstalk_coefficient))
+            sum_pure_source_channel * (1.0 - crosstalk_coefficient))
 
     # Calculate the bleed-through signal
     bleed_through_signal = alpha * pure_source_channel
@@ -189,81 +171,145 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
     return normalized_mixed_target_channel / NORM_COEFF, bleedthrough_proportion  # Assuming you still want 0-1 float output
 
 
+# Global constants for the connection
 HOST = 'ws://idr.openmicroscopy.org/omero-ws'
-conn = BlitzGateway('public', 'public', host=HOST, secure=True)
-print(conn.connect())
-conn.c.enableKeepAlive(60)
+USER = 'public'
+PASS = 'public'
 
-projects = list(conn.getObjects("Project"))
 
-# Define the attribute and the value you're looking for
-attribute_name = "Imaging Method"
-# Define your search terms as a list
-search_terms = ["fluorescence", "confocal"]
+def worker_task(args, images_to_process):
+    """
+    This function represents the work for a single thread.
+    It opens one connection, processes a batch of images, and then closes the connection.
+    """
+    if images_to_process == 0:
+        return
 
-for j in range(n_images):
-    print(f'Obtaining image set {j} of {n_images}')
-    foundProject = False
+    print(f"Thread starting. Assigned to process {images_to_process} images. Creating new connection...")
 
-    while not foundProject:
-        random_project = random.choice(projects)
-        print(f'Checking project {random_project.getName()}')
-        kv_annotations = random_project.listAnnotations()  # or specific namespace if known
-        for annotation in kv_annotations:
-            if hasattr(annotation, 'getMapValue'):  # check if it's a MapAnnotation
-                for key_value_pair in annotation.getMapValue():
-                    key = key_value_pair.name
-                    value = key_value_pair.value
-                    if key == attribute_name:
-                        print(f'{key}: {value}')
-                        if any(term.lower() in value.lower() for term in search_terms):
-                            datasets = list(random_project.listChildren())
-                            random_dataset = random.choice(datasets)
-                            images = list(random_dataset.listChildren())
-                            random_image = random.choice(images)
-                            if random_image.getPrimaryPixels().getSizeC() > 1 and random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and random_image.getPrimaryPixels().getSizeY() > MIN_SIZE:
-                                foundProject = True
-                                break
+    conn = None
+    try:
+        # Create the connection once per thread
+        conn = BlitzGateway(USER, PASS, host=HOST, secure=True)
+        conn.connect()
+        conn.c.enableKeepAlive(60)
 
-    print_obj(random_project)
-    print_obj(random_dataset)
-    print_obj(random_image)
+        for i in range(images_to_process):
+            print(f'Processing image {i + 1} of {images_to_process} in this thread.')
 
-    data = load_numpy_array(random_image)
+            # This is the original logic to find, download, and process a single image
+            projects = list(conn.getObjects("Project"))
+            attribute_name = "Imaging Method"
+            search_terms = ["fluorescence", "confocal"]
 
-    if data is not None:
-        source_channel = random.choice(range(np.size(data[0], 0)))
-        target_channel = source_channel
+            foundProject = False
+            while not foundProject:
+                random_project = random.choice(projects)
+                # print(f'Checking project {random_project.getName()}') # Uncomment for more verbose logging
+                kv_annotations = random_project.listAnnotations()
+                for annotation in kv_annotations:
+                    if hasattr(annotation, 'getMapValue'):
+                        for key_value_pair in annotation.getMapValue():
+                            key = key_value_pair.name
+                            value = key_value_pair.value
+                            if key == attribute_name:
+                                if any(term.lower() in value.lower() for term in search_terms):
+                                    datasets = list(random_project.listChildren())
+                                    random_dataset = random.choice(datasets)
+                                    images = list(random_dataset.listChildren())
+                                    random_image = random.choice(images)
+                                    if (random_image.getPrimaryPixels().getSizeC() > 1 and
+                                            random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and
+                                            random_image.getPrimaryPixels().getSizeY() > MIN_SIZE):
+                                        foundProject = True
+                                        break
 
-        while source_channel == target_channel:
-            target_channel = random.choice(range(np.size(data[0], 0)))
+            print_obj(random_project)
+            print_obj(random_dataset)
+            print_obj(random_image)
 
-        print(f'Source Channel: {source_channel}')
-        print(f'Target Channel: {target_channel}')
+            data = load_numpy_array(random_image)
+            if data is not None:
+                source_channel = random.choice(range(np.size(data[0], 0)))
+                target_channel = source_channel
 
-        # Define a set of crosstalk coefficients to generate diverse data
-        crosstalk_coefficients = [random.random() * max_crosstalk]  # Include no crosstalk (0.0)
+                while source_channel == target_channel:
+                    target_channel = random.choice(range(np.size(data[0], 0)))
 
-        for j, alpha in enumerate(crosstalk_coefficients):
-            mixed_image, crosstalk_proportion = generate_crosstalk_data(
-                pure_target_channel=data[0, target_channel, 0],
-                pure_source_channel=data[0, source_channel, 0],
-                crosstalk_coefficient=alpha
-            )
+                print(f'Source Channel: {source_channel}')
+                print(f'Target Channel: {target_channel}')
 
-            if mixed_image is not None:
-                # Generate unique filenames
-                mixed_filename = os.path.join(mixed_dir,
-                                              f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
-                source_filename = os.path.join(source_dir,
-                                               f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
+                crosstalk_coefficients = [random.random() * args.max_crosstalk]
 
-                # Save the generated images
-                save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
-                print(f'Generated and saved {mixed_filename} in {mixed_dir}')
-                save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename, new_shape=[MIN_SIZE, MIN_SIZE])
-            print(f'Generated and saved {source_filename} in {source_dir}')
-    else:
-        print("No image has been loaded - something has gone wrong somewhere!")
+                for alpha in crosstalk_coefficients:
+                    mixed_image, crosstalk_proportion = generate_crosstalk_data(
+                        pure_target_channel=data[0, target_channel, 0],
+                        pure_source_channel=data[0, source_channel, 0],
+                        crosstalk_coefficient=alpha
+                    )
 
-conn.close()
+                    if mixed_image is not None:
+                        mixed_filename = os.path.join(args.mixed_dir,
+                                                      f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
+                        source_filename = os.path.join(args.source_dir,
+                                                       f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
+
+                        save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
+                        print(f'Generated and saved {mixed_filename} in {args.mixed_dir}')
+                        save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename,
+                                    new_shape=[MIN_SIZE, MIN_SIZE])
+                        print(f'Generated and saved {source_filename} in {args.source_dir}')
+            else:
+                print("No image has been loaded - something has gone wrong somewhere!")
+
+    except Exception as e:
+        print(f"An error occurred in a thread: {e}")
+    finally:
+        # Close the connection only once per thread
+        if conn and conn.isConnected():
+            conn.close()
+            print(f"Thread finished. Connection closed.")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    # ... (your argument definitions) ...
+    parser.add_argument('-c', '--max_crosstalk',
+                        help='Maximum relative crosstalk applied from source channel to bleed channel',
+                        type=float, default=0.5)
+    parser.add_argument('-b', '--mixed_dir', help='Directory to save generated "bleed-through" images')
+    parser.add_argument('-s', '--source_dir', help='Directory to save original "source" channel')
+    parser.add_argument('-g', '--ground_truth_dir',
+                        help='Directory to save "ground truth" images showing extent of bleed-through')
+    parser.add_argument('-n', '--number_of_images',
+                        help='Number of image sets to generate',
+                        type=int, default=1)
+    args = parser.parse_args()
+
+    # Determine the number of workers to use
+    num_workers = min(args.number_of_images, os.cpu_count() * 4)
+
+    # --- Improved work distribution logic ---
+    images_per_worker = args.number_of_images // num_workers
+    remainder = args.number_of_images % num_workers
+
+    # Create a list of image counts for each worker
+    work_items = [images_per_worker] * num_workers
+    for i in range(remainder):
+        work_items[i] += 1
+    # work_items will look something like [5, 5, 5, 4] for 19 images and 4 workers
+
+    print(f"Total images to generate: {args.number_of_images}")
+    print(f"Number of workers: {num_workers}")
+    print(f"Work distribution: {work_items}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit one task per worker, each with its pre-calculated batch size
+        futures = [executor.submit(worker_task, args, count)
+                   for count in work_items]
+
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"An exception from a thread was propagated: {e}")
