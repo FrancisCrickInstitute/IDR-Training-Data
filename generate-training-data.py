@@ -1,23 +1,27 @@
 import argparse
 import concurrent.futures
+import logging
 import os
 import random
+import time
 
-import imageio.v3 as iio  # Using imageio v3 for modern API
+import imageio.v3 as iio
 import numpy as np
 from omero.gateway import BlitzGateway
 from skimage.transform import resize
+from tqdm import tqdm
 
 MIN_SIZE = 256
 NORM_COEFF = np.power(2, 16)
 
 
+# All print_obj statements will now go to the log file
 def print_obj(obj, indent=0):
     """
     Helper method to display info about OMERO objects.
-    Not all objects will have a "name" or owner field.
+    Now uses logging instead of printing to stdout.
     """
-    print("""%s%s:%s  Name:"%s" (owner=%s)""" % (
+    logging.info("""%s%s:%s  Name:"%s" (owner=%s)""" % (
         " " * indent,
         obj.OMERO_CLASS,
         obj.getId(),
@@ -27,22 +31,8 @@ def print_obj(obj, indent=0):
 
 def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
     """
-    Loads a microscopy image into a NumPy array, applying random cropping
-    if the image dimensions exceed specified limits, and choosing Z and T
-    planes randomly. This version loads only the cropped region efficiently.
-
-    Args:
-        image: An OMERO image object (e.g., omero.gateway.ImageWrapper)
-               from which to load pixel data and metadata.
-        target_x_dim (int): The maximum desired X dimension. If the image
-                            is larger, it will be cropped to this size.
-        target_y_dim (int): The maximum desired Y dimension. If the image
-                            is larger, it will be cropped to this size.
-
-    Returns:
-        numpy.ndarray: The loaded (and potentially cropped) image data
-                       reshaped to (1, size_c, 1, cropped_size_y, cropped_size_x).
-        None: If there's an error during processing or if image dimensions are invalid.
+    Loads a microscopy image into a NumPy array.
+    Uses logging for status messages.
     """
     pixels = image.getPrimaryPixels()
 
@@ -52,91 +42,56 @@ def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
     size_y = pixels.getSizeY()
     size_x = pixels.getSizeX()
 
-    # Ensure dimensions are valid for loading
     if size_z < 1 or size_t < 1 or size_c < 1:
-        print(
-            f"Warning: Image {image.getName()} has invalid dimensions (Z:{size_z}, C:{size_c}, T:{size_t}). Cannot load planes.")
+        logging.warning(
+            f"Image {image.getName()} has invalid dimensions (Z:{size_z}, C:{size_c}, T:{size_t}). Cannot load planes.")
         return None
 
-    # Randomly select Z and T planes
     selected_z_plane = random.randint(0, size_z - 1)
     selected_t_timepoint = random.randint(0, size_t - 1)
 
-    s = "t:%s c:%s z:%s y:%s x:%s (selected t:%s z:%s)" % \
-        (size_t, size_c, size_z, size_y, size_x, selected_t_timepoint, selected_z_plane)
-    print(s)
+    s = f"t:{size_t} c:{size_c} z:{size_z} y:{size_y} x:{size_x} (selected t:{selected_t_timepoint} z:{selected_z_plane})"
+    logging.info(s)
 
-    # --- Determine Cropping Dimensions and Start Points ---
-    # Ensure cropped dimensions don't exceed original dimensions
     cropped_size_y = min(target_y_dim, size_y)
     cropped_size_x = min(target_x_dim, size_x)
-
-    # Calculate random start_y/start_x if original dim is larger than target
     start_y = random.randint(0, size_y - cropped_size_y) if size_y > target_y_dim else 0
     start_x = random.randint(0, size_x - cropped_size_x) if size_x > target_x_dim else 0
 
-    # --- Efficiently Load Only the Cropped Region ---
     loaded_planes = []
-    print(
+    logging.info(
         f"Downloading image {image.getName()} (cropped region: X={start_x}-{start_x + cropped_size_x}, Y={start_y}-{start_y + cropped_size_y})")
     try:
         for c in range(size_c):
-            # --- FIX: Pass Z, C, T, and the tile coordinates as a single tuple ---
-            # This signature matches the argument count constraints and the pattern
-            # implied by your getTiles example for a single tile.
             tile_coords_tuple = (start_x, start_y, cropped_size_x, cropped_size_y)
-
-            # The assumed getTile() signature is now:
-            # getTile(z, c, t, (x, y, width, height))
-            plane_data = pixels.getTile(
-                selected_z_plane, c, selected_t_timepoint, tile_coords_tuple
-            )
+            plane_data = pixels.getTile(selected_z_plane, c, selected_t_timepoint, tile_coords_tuple)
             loaded_planes.append(plane_data)
-
-        # Stack the loaded tiles. Shape will be (size_c, cropped_size_y, cropped_size_x)
         all_channels_cropped_data = np.stack(loaded_planes)
-
     except Exception as e:
-        print(f"Error loading cropped planes for image {image.getName()}: {e}")
+        logging.error(f"Error loading cropped planes for image {image.getName()}: {e}")
         return None
 
-    # Reshape to (1, size_c, 1, cropped_size_y, cropped_size_x)
     final_shape = (1, size_c, 1, cropped_size_y, cropped_size_x)
     return np.reshape(all_channels_cropped_data, newshape=final_shape)
 
 
 def save_images(image: np.ndarray, filename: str, new_shape=None):
-    """
-    Saves a NumPy array as a TIFF image.
-    Resizes the image if new_shape is specified.
-    Handles appropriate data type conversion for saving.
-
-    Parameters:
-    - image: NumPy array representing the image.
-    - filename: String representing the filename to save the image as.
-    - new_shape: Tuple representing the new shape (height, width) for the image.
-    """
     if new_shape is not None:
-        # Resize the image with interpolation
         image = resize(image, new_shape, preserve_range=True)
-
-    # Imageio can handle float32 directly for TIFF.
     iio.imwrite(filename, image, extension='.tif')
-    print(f"Saved {filename}")
+    logging.info(f"Saved {filename}")
 
 
 def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel: np.ndarray,
                             crosstalk_coefficient: float) -> tuple[np.ndarray, float]:
     if not (0.0 <= crosstalk_coefficient <= 1.0):
-        print("Warning: Crosstalk coefficient is typically between 0 and 1.")
+        logging.warning("Crosstalk coefficient is typically between 0 and 1.")
 
     if pure_target_channel.shape != pure_source_channel.shape:
         raise ValueError("Pure target and source channel images must have the same shape.")
 
-    # Ensure inputs are float to allow for scaling and addition
     pure_target_channel = pure_target_channel.astype(np.float64)
     pure_source_channel = pure_source_channel.astype(np.float64)
-
     sum_pure_target_channel = float(np.sum(pure_target_channel))
     sum_pure_source_channel = float(np.sum(pure_source_channel))
 
@@ -145,59 +100,43 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
 
     alpha = (crosstalk_coefficient * sum_pure_target_channel) / (
             sum_pure_source_channel * (1.0 - crosstalk_coefficient))
-
-    # Calculate the bleed-through signal
     bleed_through_signal = alpha * pure_source_channel
-
-    # Generate the mixed target channel image
     mixed_target_channel = pure_target_channel + bleed_through_signal
-
-    # Rescale the entire image based on its actual min/max
     current_max = np.max(mixed_target_channel)
 
-    if current_max == 0:  # Handle uniform image to avoid division by zero
+    if current_max == 0:
         normalized_mixed_target_channel = np.zeros_like(mixed_target_channel)
     else:
-        # Scale to 0 to NORM_COEFF range
         normalized_mixed_target_channel = mixed_target_channel * NORM_COEFF / current_max
 
     sum_mixed_target_channel = float(np.sum(mixed_target_channel))
-
     if sum_mixed_target_channel > 0.0:
         bleedthrough_proportion = float(np.sum(bleed_through_signal)) / sum_mixed_target_channel
     else:
         bleedthrough_proportion = 0.0
 
-    return normalized_mixed_target_channel / NORM_COEFF, bleedthrough_proportion  # Assuming you still want 0-1 float output
+    return normalized_mixed_target_channel / NORM_COEFF, bleedthrough_proportion
 
 
-# Global constants for the connection
 HOST = 'ws://idr.openmicroscopy.org/omero-ws'
 USER = 'public'
 PASS = 'public'
 
 
 def worker_task(args, images_to_process):
-    """
-    This function represents the work for a single thread.
-    It opens one connection, processes a batch of images, and then closes the connection.
-    """
     if images_to_process == 0:
         return
 
-    print(f"Thread starting. Assigned to process {images_to_process} images. Creating new connection...")
-
+    logging.info(f"Thread starting. Assigned to process {images_to_process} images. Creating new connection...")
     conn = None
     try:
-        # Create the connection once per thread
         conn = BlitzGateway(USER, PASS, host=HOST, secure=True)
         conn.connect()
         conn.c.enableKeepAlive(60)
 
         for i in range(images_to_process):
-            print(f'Processing image {i + 1} of {images_to_process} in this thread.')
+            logging.info(f'Processing image {i + 1} of {images_to_process} in this thread.')
 
-            # This is the original logic to find, download, and process a single image
             projects = list(conn.getObjects("Project"))
             attribute_name = "Imaging Method"
             search_terms = ["fluorescence", "confocal"]
@@ -205,7 +144,6 @@ def worker_task(args, images_to_process):
             foundProject = False
             while not foundProject:
                 random_project = random.choice(projects)
-                # print(f'Checking project {random_project.getName()}') # Uncomment for more verbose logging
                 kv_annotations = random_project.listAnnotations()
                 for annotation in kv_annotations:
                     if hasattr(annotation, 'getMapValue'):
@@ -224,6 +162,7 @@ def worker_task(args, images_to_process):
                                         foundProject = True
                                         break
 
+            # Note: print_obj now uses the logger
             print_obj(random_project)
             print_obj(random_dataset)
             print_obj(random_image)
@@ -232,84 +171,86 @@ def worker_task(args, images_to_process):
             if data is not None:
                 source_channel = random.choice(range(np.size(data[0], 0)))
                 target_channel = source_channel
-
                 while source_channel == target_channel:
                     target_channel = random.choice(range(np.size(data[0], 0)))
 
-                print(f'Source Channel: {source_channel}')
-                print(f'Target Channel: {target_channel}')
+                logging.info(f'Source Channel: {source_channel}')
+                logging.info(f'Target Channel: {target_channel}')
 
                 crosstalk_coefficients = [random.random() * args.max_crosstalk]
-
                 for alpha in crosstalk_coefficients:
                     mixed_image, crosstalk_proportion = generate_crosstalk_data(
                         pure_target_channel=data[0, target_channel, 0],
                         pure_source_channel=data[0, source_channel, 0],
                         crosstalk_coefficient=alpha
                     )
-
                     if mixed_image is not None:
                         mixed_filename = os.path.join(args.mixed_dir,
                                                       f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
                         source_filename = os.path.join(args.source_dir,
                                                        f"image_{random_image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
-
                         save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
-                        print(f'Generated and saved {mixed_filename} in {args.mixed_dir}')
+                        logging.info(f'Generated and saved {mixed_filename} in {args.mixed_dir}')
                         save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename,
                                     new_shape=[MIN_SIZE, MIN_SIZE])
-                        print(f'Generated and saved {source_filename} in {args.source_dir}')
+                        logging.info(f'Generated and saved {source_filename} in {args.source_dir}')
             else:
-                print("No image has been loaded - something has gone wrong somewhere!")
-
+                logging.error("No image has been loaded - something has gone wrong somewhere!")
     except Exception as e:
-        print(f"An error occurred in a thread: {e}")
+        logging.error(f"An error occurred in a thread: {e}")
     finally:
-        # Close the connection only once per thread
         if conn and conn.isConnected():
             conn.close()
-            print(f"Thread finished. Connection closed.")
+            logging.info(f"Thread finished. Connection closed.")
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    # ... (your argument definitions) ...
-    parser.add_argument('-c', '--max_crosstalk',
-                        help='Maximum relative crosstalk applied from source channel to bleed channel',
-                        type=float, default=0.5)
+    parser.add_argument('-c', '--max_crosstalk', type=float, default=0.5,
+                        help='Maximum relative crosstalk applied from source channel to bleed channel')
     parser.add_argument('-b', '--mixed_dir', help='Directory to save generated "bleed-through" images')
     parser.add_argument('-s', '--source_dir', help='Directory to save original "source" channel')
     parser.add_argument('-g', '--ground_truth_dir',
                         help='Directory to save "ground truth" images showing extent of bleed-through')
-    parser.add_argument('-n', '--number_of_images',
-                        help='Number of image sets to generate',
-                        type=int, default=1)
+    parser.add_argument('-n', '--number_of_images', type=int, default=1,
+                        help='Number of image sets to generate')
+    parser.add_argument('-l', '--log_file', type=str, default='processing.log',
+                        help='Path to the log file for detailed output')
     args = parser.parse_args()
 
-    # Determine the number of workers to use
-    num_workers = min(args.number_of_images, os.cpu_count() * 4)
+    # Configure the logger to output to a file and not the console
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s',
+                        handlers=[logging.FileHandler(args.log_file, mode='w')])
 
-    # --- Improved work distribution logic ---
+    # Let the user know where the detailed log can be found
+    print(f"Detailed logs are being written to {args.log_file}")
+    # --- Start the timer here ---
+    start_time = time.time()
+
+    num_workers = min(args.number_of_images, os.cpu_count() * 4)
     images_per_worker = args.number_of_images // num_workers
     remainder = args.number_of_images % num_workers
-
-    # Create a list of image counts for each worker
     work_items = [images_per_worker] * num_workers
     for i in range(remainder):
         work_items[i] += 1
-    # work_items will look something like [5, 5, 5, 4] for 19 images and 4 workers
 
     print(f"Total images to generate: {args.number_of_images}")
     print(f"Number of workers: {num_workers}")
     print(f"Work distribution: {work_items}")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        # Submit one task per worker, each with its pre-calculated batch size
-        futures = [executor.submit(worker_task, args, count)
-                   for count in work_items]
+        futures = [executor.submit(worker_task, args, count) for count in work_items]
 
-        for future in concurrent.futures.as_completed(futures):
+        # Use tqdm to create a progress bar for the completion of each worker task
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Workers completed"):
             try:
                 future.result()
             except Exception as e:
-                print(f"An exception from a thread was propagated: {e}")
+                # This catches exceptions from the threads that are not handled within the worker_task function.
+                logging.exception("An exception from a thread was propagated.")
+    # --- End the timer and print the result ---
+    end_time = time.time()
+    total_time = end_time - start_time
+    print("\nAll tasks completed. Please check the log file for details.")
+    print(f"Total execution time: {total_time:.2f} seconds")
