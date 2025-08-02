@@ -294,8 +294,6 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--mixed_dir', help='Directory to save generated "bleed-through" images')
     parser.add_argument('-s', '--source_dir', help='Directory to save original "source" channel')
     parser.add_argument('-t', '--target_dir', help='Directory to save original "target" channel')
-    parser.add_argument('-g', '--ground_truth_dir',
-                        help='Directory to save "ground truth" images showing extent of bleed-through')
     parser.add_argument('-n', '--number_of_images', type=int, default=1,
                         help='Number of image sets to generate')
     parser.add_argument('-l', '--log_file', type=str, default='processing.log',
