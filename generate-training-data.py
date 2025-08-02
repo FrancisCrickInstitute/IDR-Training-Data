@@ -265,9 +265,13 @@ def worker_task(args, images_to_process):
                                                           f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
                             source_filename = os.path.join(args.source_dir,
                                                            f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
+                            target_filename = os.path.join(args.target_dir,
+                                                         f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_target.tif")
                             save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
                             logging.info(f'Generated and saved {mixed_filename} in {args.mixed_dir}')
                             save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename,
+                                        new_shape=[MIN_SIZE, MIN_SIZE])
+                            save_images(data[0, target_channel, 0] / NORM_COEFF, target_filename,
                                         new_shape=[MIN_SIZE, MIN_SIZE])
                             logging.info(f'Generated and saved {source_filename} in {args.source_dir}')
                 else:
@@ -289,6 +293,7 @@ if __name__ == '__main__':
                         help='Maximum relative crosstalk applied from source channel to bleed channel')
     parser.add_argument('-b', '--mixed_dir', help='Directory to save generated "bleed-through" images')
     parser.add_argument('-s', '--source_dir', help='Directory to save original "source" channel')
+    parser.add_argument('-t', '--target_dir', help='Directory to save original "target" channel')
     parser.add_argument('-g', '--ground_truth_dir',
                         help='Directory to save "ground truth" images showing extent of bleed-through')
     parser.add_argument('-n', '--number_of_images', type=int, default=1,
@@ -304,8 +309,7 @@ if __name__ == '__main__':
     print(f"Detailed logs are being written to {args.log_file}")
     start_time = time.time()
 
-    # num_workers = min(args.number_of_images, os.cpu_count() * 4)
-    num_workers = 1
+    num_workers = min(args.number_of_images, os.cpu_count() * 4)
     images_per_worker = args.number_of_images // num_workers
     remainder = args.number_of_images % num_workers
     work_items = [images_per_worker] * num_workers
