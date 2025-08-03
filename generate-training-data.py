@@ -3,6 +3,7 @@ import concurrent.futures
 import logging
 import os
 import random
+import threading
 import time
 
 import imageio.v3 as iio
@@ -13,6 +14,10 @@ from tqdm import tqdm
 
 MIN_SIZE = 256
 NORM_COEFF = np.power(2, 16)
+
+# Global set to track used image IDs across all threads
+used_image_ids = set()
+used_image_ids_lock = threading.Lock()
 
 
 def print_obj(obj, indent=0):
@@ -26,6 +31,19 @@ def print_obj(obj, indent=0):
         obj.getId(),
         obj.getName(),
         obj.getOwnerOmeName()))
+
+
+def is_image_already_used(image_id):
+    """Check if an image ID has already been processed."""
+    with used_image_ids_lock:
+        return image_id in used_image_ids
+
+
+def mark_image_as_used(image_id):
+    """Mark an image ID as processed."""
+    with used_image_ids_lock:
+        used_image_ids.add(image_id)
+        return True
 
 
 def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
@@ -112,12 +130,12 @@ HOST = 'ws://idr.openmicroscopy.org/omero-ws'
 USER = 'public'
 PASS = 'public'
 
-MAX_RETRIES = 100
+MAX_RETRIES = 1000  # Increased to handle duplicate avoidance
 
 
 def find_random_project_image(conn):
     """
-    Finds a random image from the Project > Dataset hierarchy.
+    Finds a random image from the Project > Dataset hierarchy that hasn't been used.
     Returns: A tuple of (project, dataset, image) or (None, None, None) on failure.
     """
     projects = list(conn.getObjects("Project"))
@@ -147,28 +165,32 @@ def find_random_project_image(conn):
 
         datasets = list(random_project.listChildren())
         if not datasets:
-            logging.warning(f"No datasets found in project '{random_project.getName()}'. Retrying...")
             continue
+
         random_dataset = random.choice(datasets)
         images = list(random_dataset.listChildren())
         if not images:
-            logging.warning(f"No images found in dataset '{random_dataset.getName()}'. Retrying...")
             continue
-        random_image = random.choice(images)
 
-        if (random_image.getPrimaryPixels().getSizeC() > 1 and
-                random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and
-                random_image.getPrimaryPixels().getSizeY() > MIN_SIZE):
-            logging.info(f"Successfully found a suitable image in Project hierarchy after {retry_count} attempts.")
-            return random_project, random_dataset, random_image
+        # Try multiple images from this dataset to find an unused one
+        random.shuffle(images)  # Randomize the order
+        for image in images[:min(10, len(images))]:  # Check up to 10 images from this dataset
+            if (image.getPrimaryPixels().getSizeC() > 1 and
+                    image.getPrimaryPixels().getSizeX() > MIN_SIZE and
+                    image.getPrimaryPixels().getSizeY() > MIN_SIZE and
+                    not is_image_already_used(image.getId())):
+                # Mark as used immediately to prevent race conditions
+                mark_image_as_used(image.getId())
+                logging.info(f"Successfully found unused project image after {retry_count} attempts.")
+                return random_project, random_dataset, image
 
-    logging.error(f"Failed to find a suitable Project image after {MAX_RETRIES} attempts.")
+    logging.error(f"Failed to find an unused Project image after {MAX_RETRIES} attempts.")
     return None, None, None
 
 
 def find_random_screen_image(conn):
     """
-    Finds a random image from the Screen > Plate > Well hierarchy.
+    Finds a random image from the Screen > Plate > Well hierarchy that hasn't been used.
     Returns: A tuple of (screen, plate, well, image) or (None, None, None, None) on failure.
     """
     screens = list(conn.getObjects("Screen"))
@@ -182,50 +204,57 @@ def find_random_screen_image(conn):
         random_screen = random.choice(screens)
         plates = list(random_screen.listChildren())
         if not plates:
-            logging.warning(f"No plates found in screen '{random_screen.getName()}'. Retrying...")
             continue
+
         random_plate = random.choice(plates)
         wells = list(random_plate.listChildren())
         if not wells:
-            logging.warning(f"No wells found in plate '{random_plate.getName()}'. Retrying...")
             continue
+
         random_well = random.choice(wells)
-        images = list(random_well.listChildren())
-        if not images:
-            logging.warning(f"No images found in well '{random_well.getRow()}{random_well.getColumn()}'. Retrying...")
+        well_samples = list(random_well.listChildren())
+        if not well_samples:
             continue
 
-        random_image = random.choice(images).getImage()
-        if (random_image.getPrimaryPixels().getSizeC() > 1 and
-                random_image.getPrimaryPixels().getSizeX() > MIN_SIZE and
-                random_image.getPrimaryPixels().getSizeY() > MIN_SIZE):
-            logging.info(f"Successfully found a suitable image in Screen hierarchy after {retry_count} attempts.")
-            return random_screen, random_plate, random_well, random_image
+        # Try multiple images from this well to find an unused one
+        random.shuffle(well_samples)  # Randomize the order
+        for well_sample in well_samples[:min(5, len(well_samples))]:  # Check up to 5 images from this well
+            image = well_sample.getImage()
+            if (image.getPrimaryPixels().getSizeC() > 1 and
+                    image.getPrimaryPixels().getSizeX() > MIN_SIZE and
+                    image.getPrimaryPixels().getSizeY() > MIN_SIZE and
+                    not is_image_already_used(image.getId())):
+                # Mark as used immediately to prevent race conditions
+                mark_image_as_used(image.getId())
+                logging.info(f"Successfully found unused screen image after {retry_count} attempts.")
+                return random_screen, random_plate, random_well, image
 
-    logging.error(f"Failed to find a suitable Screen image after {MAX_RETRIES} attempts.")
+    logging.error(f"Failed to find an unused Screen image after {MAX_RETRIES} attempts.")
     return None, None, None, None
 
 
-def worker_task(args, images_to_process):
+def worker_task(args, images_to_process, worker_id):
     if images_to_process == 0:
         return
 
-    logging.info(f"Thread starting. Assigned to process {images_to_process} images. Creating new connection...")
+    logging.info(
+        f"Worker {worker_id} starting. Assigned to process {images_to_process} images. Creating new connection...")
     conn = None
     try:
         conn = BlitzGateway(USER, PASS, host=HOST, secure=True)
         conn.connect()
         conn.c.enableKeepAlive(60)
 
+        successful_processes = 0
         for i in range(images_to_process):
-            logging.info(f'Processing image {i + 1} of {images_to_process} in this thread.')
+            logging.info(f'Worker {worker_id}: Processing image {i + 1} of {images_to_process}.')
 
             image = None
             # Randomly choose between Project hierarchy (0) and Screen hierarchy (1)
             hierarchy_choice = random.choice([0, 1])
 
             if hierarchy_choice == 0:
-                logging.info("Choosing image from Project hierarchy.")
+                logging.info(f"Worker {worker_id}: Choosing image from Project hierarchy.")
                 random_project, random_dataset, random_image = find_random_project_image(conn)
                 if random_image:
                     print_obj(random_project)
@@ -233,7 +262,7 @@ def worker_task(args, images_to_process):
                     print_obj(random_image)
                     image = random_image
             else:
-                logging.info("Choosing image from Screen hierarchy.")
+                logging.info(f"Worker {worker_id}: Choosing image from Screen hierarchy.")
                 random_screen, random_plate, random_well, random_image = find_random_screen_image(conn)
                 if random_image:
                     print_obj(random_screen)
@@ -266,7 +295,7 @@ def worker_task(args, images_to_process):
                             source_filename = os.path.join(args.source_dir,
                                                            f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
                             target_filename = os.path.join(args.target_dir,
-                                                         f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_target.tif")
+                                                           f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_target.tif")
                             save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
                             logging.info(f'Generated and saved {mixed_filename} in {args.mixed_dir}')
                             save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename,
@@ -274,17 +303,21 @@ def worker_task(args, images_to_process):
                             save_images(data[0, target_channel, 0] / NORM_COEFF, target_filename,
                                         new_shape=[MIN_SIZE, MIN_SIZE])
                             logging.info(f'Generated and saved {source_filename} in {args.source_dir}')
+                            successful_processes += 1
                 else:
                     logging.error("No image has been loaded - something has gone wrong somewhere!")
             else:
-                logging.warning("Could not find a suitable image to process in this iteration.")
+                logging.warning(
+                    f"Worker {worker_id}: Could not find a suitable unused image to process in this iteration.")
+
+        logging.info(f"Worker {worker_id} completed. Successfully processed {successful_processes} images.")
 
     except Exception as e:
-        logging.error(f"An error occurred in a thread: {e}")
+        logging.error(f"An error occurred in worker {worker_id}: {e}")
     finally:
         if conn and conn.isConnected():
             conn.close()
-            logging.info(f"Thread finished. Connection closed.")
+            logging.info(f"Worker {worker_id} finished. Connection closed.")
 
 
 if __name__ == '__main__':
@@ -319,7 +352,7 @@ if __name__ == '__main__':
     print(f"Work distribution: {work_items}")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(worker_task, args, count) for count in work_items]
+        futures = [executor.submit(worker_task, args, count, i) for i, count in enumerate(work_items)]
 
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing images"):
             try:
@@ -332,3 +365,4 @@ if __name__ == '__main__':
 
     print("\nAll tasks completed. Please check the log file for details.")
     print(f"Total execution time: {total_time:.2f} seconds")
+    print(f"Total unique images processed: {len(used_image_ids)}")
