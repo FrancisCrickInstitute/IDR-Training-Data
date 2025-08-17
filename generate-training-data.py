@@ -1,8 +1,10 @@
 import argparse
 import concurrent.futures
+import glob
 import logging
 import os
 import random
+import re
 import shutil
 import threading
 import time
@@ -19,6 +21,46 @@ NORM_COEFF = np.power(2, 16)
 # Global set to track used image IDs across all threads
 used_image_ids = set()
 used_image_ids_lock = threading.Lock()
+
+
+def prepopulate_used_image_ids(args):
+    """
+    Prepopulate the used_image_ids set by extracting image IDs from existing files
+    in the output directories.
+    """
+    directories_to_check = []
+    if args.mixed_dir and os.path.exists(args.mixed_dir):
+        directories_to_check.append(args.mixed_dir)
+    if args.source_dir and os.path.exists(args.source_dir):
+        directories_to_check.append(args.source_dir)
+    if args.target_dir and os.path.exists(args.target_dir):
+        directories_to_check.append(args.target_dir)
+
+    # Pattern to match filenames like: image_12345_alpha_0.25_mixed.tif
+    pattern = re.compile(r'image_(\d+)_alpha_[\d.]+_(?:mixed|source|target)\.tif')
+
+    extracted_ids = set()
+
+    for directory in directories_to_check:
+        print(f"Checking existing files in: {directory}")
+        tif_files = glob.glob(os.path.join(directory, "*.tif"))
+
+        for file_path in tif_files:
+            filename = os.path.basename(file_path)
+            match = pattern.match(filename)
+            if match:
+                image_id = int(match.group(1))
+                extracted_ids.add(image_id)
+
+    # Update the global used_image_ids set
+    global used_image_ids
+    with used_image_ids_lock:
+        used_image_ids.update(extracted_ids)
+
+    print(f"Prepopulated used_image_ids with {len(extracted_ids)} existing image IDs")
+    logging.info(f"Prepopulated used_image_ids with {len(extracted_ids)} existing image IDs")
+
+    return len(extracted_ids)
 
 
 def clean_output_directories(args):
@@ -350,6 +392,8 @@ def print_obj(obj, indent=0):
                             help='Number of image sets to generate')
         parser.add_argument('-l', '--log_file', type=str, default='processing.log',
                             help='Path to the log file for detailed output')
+        parser.add_argument('-p', '--skip-prepopulate', action='store_true',
+                            help='Skip prepopulating used image IDs from existing files')
         args = parser.parse_args()
 
         logging.basicConfig(level=logging.INFO,
@@ -358,8 +402,19 @@ def print_obj(obj, indent=0):
 
         print(f"Detailed logs are being written to {args.log_file}")
 
-        # Clean/create output directories
-        clean_output_directories(args)
+        # Clean/create output directories (MODIFIED: only clean if not prepopulating)
+        if args.skip_prepopulate:
+            clean_output_directories(args)
+        else:
+            # Create directories if they don't exist, but don't clean them
+            directories = [args.mixed_dir, args.source_dir, args.target_dir]
+            for directory in directories:
+                if directory and not os.path.exists(directory):
+                    print(f"Creating directory: {directory}")
+                    os.makedirs(directory, exist_ok=True)
+
+            # Prepopulate used image IDs from existing files
+            prepopulate_used_image_ids(args)
 
         start_time = time.time()
 
