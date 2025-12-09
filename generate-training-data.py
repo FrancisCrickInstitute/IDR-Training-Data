@@ -33,8 +33,6 @@ def prepopulate_used_image_ids(args):
         directories_to_check.append(args.mixed_dir)
     if args.source_dir and os.path.exists(args.source_dir):
         directories_to_check.append(args.source_dir)
-    if args.target_dir and os.path.exists(args.target_dir):
-        directories_to_check.append(args.target_dir)
 
     # Pattern to match filenames like: image_12345_alpha_0.25_mixed.tif
     pattern = re.compile(r'image_(\d+)_alpha_[\d.]+_(?:mixed|source|target)\.tif')
@@ -269,10 +267,35 @@ Returns: A tuple of (screen, plate, well, image) or (None, None, None, None) on 
         logging.error("No screens found on the server.")
         return None, None, None, None
 
+    attribute_name = "Imaging Method"
+    search_terms = ["fluorescence", "confocal"]
+
     retry_count = 0
     while retry_count < MAX_RETRIES:
         retry_count += 1
-        random_screen = random.choice(screens)
+        # random_screen = random.choice(screens)
+        for s in screens:
+            if s.getId() == 2451:
+                random_screen = s
+                break
+
+        kv_annotations = random_screen.listAnnotations()
+        found_imaging_method = False
+        for annotation in kv_annotations:
+            if hasattr(annotation, 'getMapValue'):
+                for key_value_pair in annotation.getMapValue():
+                    key = key_value_pair.name
+                    value = key_value_pair.value
+                    if key == attribute_name:
+                        if any(term.lower() in value.lower() for term in search_terms):
+                            found_imaging_method = True
+                            break
+            if found_imaging_method:
+                break
+
+        if not found_imaging_method:
+            continue
+
         plates = list(random_screen.listChildren())
         if not plates:
             continue
@@ -412,7 +435,7 @@ if __name__ == '__main__':
         clean_output_directories(args)
     else:
         # Create directories if they don't exist, but don't clean them
-        directories = [args.mixed_dir, args.source_dir, args.target_dir]
+        directories = [args.mixed_dir, args.source_dir]
         for directory in directories:
             if directory and not os.path.exists(directory):
                 print(f"Creating directory: {directory}")
