@@ -202,34 +202,62 @@ PASS = 'public'
 MAX_RETRIES = 1000  # Increased to handle duplicate avoidance
 
 
+def has_imaging_method_annotation(obj, attribute_name="Imaging Method", search_terms=None):
+    """
+    Check if an object has the required imaging method annotation.
+
+    Args:
+        obj: OMERO object (Project or Screen)
+        attribute_name: The annotation key to search for
+        search_terms: List of terms to search for in the annotation value
+
+    Returns:
+        bool: True if the object has a matching annotation
+    """
+    if search_terms is None:
+        search_terms = ["fluorescence", "confocal"]
+
+    kv_annotations = obj.listAnnotations()
+    for annotation in kv_annotations:
+        if hasattr(annotation, 'getMapValue'):
+            for key_value_pair in annotation.getMapValue():
+                key = key_value_pair.name
+                value = key_value_pair.value
+                if key == attribute_name:
+                    if any(term.lower() in value.lower() for term in search_terms):
+                        return True
+    return False
+
+
+def is_valid_image(image):
+    """
+    Check if an image meets the required criteria and hasn't been used.
+
+    Args:
+        image: OMERO image object
+
+    Returns:
+        bool: True if the image is valid and unused
+    """
+    return (image.getPrimaryPixels().getSizeC() > 1 and
+            image.getPrimaryPixels().getSizeX() > MIN_SIZE and
+            image.getPrimaryPixels().getSizeY() > MIN_SIZE and
+            not is_image_already_used(image.getId()))
+
+
 def find_random_project_image(conn):
     """
-Finds a random image from the Project > Dataset hierarchy that hasn't been used.
-Returns: A tuple of (project, dataset, image) or (None, None, None) on failure.
-"""
+    Finds a random image from the Project > Dataset hierarchy that hasn't been used.
+    Returns: A tuple of (project, dataset, image) or (None, None, None) on failure.
+    """
     projects = list(conn.getObjects("Project"))
-    attribute_name = "Imaging Method"
-    search_terms = ["fluorescence", "confocal"]
 
     retry_count = 0
     while retry_count < MAX_RETRIES:
         retry_count += 1
         random_project = random.choice(projects)
-        kv_annotations = random_project.listAnnotations()
-        found_imaging_method = False
-        for annotation in kv_annotations:
-            if hasattr(annotation, 'getMapValue'):
-                for key_value_pair in annotation.getMapValue():
-                    key = key_value_pair.name
-                    value = key_value_pair.value
-                    if key == attribute_name:
-                        if any(term.lower() in value.lower() for term in search_terms):
-                            found_imaging_method = True
-                            break
-            if found_imaging_method:
-                break
 
-        if not found_imaging_method:
+        if not has_imaging_method_annotation(random_project):
             continue
 
         datasets = list(random_project.listChildren())
@@ -242,13 +270,9 @@ Returns: A tuple of (project, dataset, image) or (None, None, None) on failure.
             continue
 
         # Try multiple images from this dataset to find an unused one
-        random.shuffle(images)  # Randomize the order
-        for image in images[:min(10, len(images))]:  # Check up to 10 images from this dataset
-            if (image.getPrimaryPixels().getSizeC() > 1 and
-                    image.getPrimaryPixels().getSizeX() > MIN_SIZE and
-                    image.getPrimaryPixels().getSizeY() > MIN_SIZE and
-                    not is_image_already_used(image.getId())):
-                # Mark as used immediately to prevent race conditions
+        random.shuffle(images)
+        for image in images[:min(10, len(images))]:
+            if is_valid_image(image):
                 mark_image_as_used(image.getId())
                 logging.info(f"Successfully found unused project image after {retry_count} attempts.")
                 return random_project, random_dataset, image
@@ -259,41 +283,20 @@ Returns: A tuple of (project, dataset, image) or (None, None, None) on failure.
 
 def find_random_screen_image(conn):
     """
-Finds a random image from the Screen > Plate > Well hierarchy that hasn't been used.
-Returns: A tuple of (screen, plate, well, image) or (None, None, None, None) on failure.
-"""
+    Finds a random image from the Screen > Plate > Well hierarchy that hasn't been used.
+    Returns: A tuple of (screen, plate, well, image) or (None, None, None, None) on failure.
+    """
     screens = list(conn.getObjects("Screen"))
     if not screens:
         logging.error("No screens found on the server.")
         return None, None, None, None
 
-    attribute_name = "Imaging Method"
-    search_terms = ["fluorescence", "confocal"]
-
     retry_count = 0
     while retry_count < MAX_RETRIES:
         retry_count += 1
-        # random_screen = random.choice(screens)
-        for s in screens:
-            if s.getId() == 2451:
-                random_screen = s
-                break
+        random_screen = random.choice(screens)
 
-        kv_annotations = random_screen.listAnnotations()
-        found_imaging_method = False
-        for annotation in kv_annotations:
-            if hasattr(annotation, 'getMapValue'):
-                for key_value_pair in annotation.getMapValue():
-                    key = key_value_pair.name
-                    value = key_value_pair.value
-                    if key == attribute_name:
-                        if any(term.lower() in value.lower() for term in search_terms):
-                            found_imaging_method = True
-                            break
-            if found_imaging_method:
-                break
-
-        if not found_imaging_method:
+        if not has_imaging_method_annotation(random_screen):
             continue
 
         plates = list(random_screen.listChildren())
@@ -311,14 +314,10 @@ Returns: A tuple of (screen, plate, well, image) or (None, None, None, None) on 
             continue
 
         # Try multiple images from this well to find an unused one
-        random.shuffle(well_samples)  # Randomize the order
-        for well_sample in well_samples[:min(5, len(well_samples))]:  # Check up to 5 images from this well
+        random.shuffle(well_samples)
+        for well_sample in well_samples[:min(5, len(well_samples))]:
             image = well_sample.getImage()
-            if (image.getPrimaryPixels().getSizeC() > 1 and
-                    image.getPrimaryPixels().getSizeX() > MIN_SIZE and
-                    image.getPrimaryPixels().getSizeY() > MIN_SIZE and
-                    not is_image_already_used(image.getId())):
-                # Mark as used immediately to prevent race conditions
+            if is_valid_image(image):
                 mark_image_as_used(image.getId())
                 logging.info(f"Successfully found unused screen image after {retry_count} attempts.")
                 return random_screen, random_plate, random_well, image
