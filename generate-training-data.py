@@ -1,6 +1,8 @@
 import argparse
 import concurrent.futures
+import csv
 import glob
+import json
 import logging
 import os
 import random
@@ -16,11 +18,24 @@ from skimage.transform import resize
 from tqdm import tqdm
 
 MIN_SIZE = 256
-NORM_COEFF = np.power(2, 16)
+MAX_CROP_SIZE = 1024
 
 # Global set to track used image IDs across all threads
 used_image_ids = set()
 used_image_ids_lock = threading.Lock()
+
+# One row per generated image pair, written by all worker threads
+metadata_lock = threading.Lock()
+METADATA_FIELDS = [
+    'mixed_file', 'source_file', 'image_id', 'image_name', 'hierarchy',
+    'project_or_screen_id', 'project_or_screen_name', 'dataset_or_plate_id', 'dataset_or_plate_name', 'well_id',
+    'imaging_method', 'cell_line',
+    'pixel_type', 'size_x', 'size_y', 'size_z', 'size_c', 'size_t',
+    'z', 't', 'crop_x', 'crop_y', 'crop_size',
+    'source_channel', 'target_channel', 'source_channel_name', 'target_channel_name',
+    'crosstalk_coefficient', 'bleedthrough_proportion', 'intensity_scale',
+    'image_annotations', 'study_annotations',
+]
 
 
 def prepopulate_used_image_ids(args):
@@ -115,11 +130,25 @@ def mark_image_as_used(image_id):
         return True
 
 
-def load_numpy_array(image, target_x_dim=1024, target_y_dim=1024):
+def append_metadata_row(path, row):
+    """Append one row to the metadata CSV, writing the header if the file is new."""
+    with metadata_lock:
+        write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+        with open(path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=METADATA_FIELDS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+
+def load_numpy_array(image, max_crop_size=MAX_CROP_SIZE):
     """
-Loads a microscopy image into a NumPy array.
-Uses logging for status messages.
-"""
+    Loads a random Z/T plane of every channel of a microscopy image, cropped to a
+    random square region no larger than max_crop_size.
+
+    Returns: (array of shape (C, crop_size, crop_size), dict describing the plane and crop),
+             or (None, None) on failure.
+    """
     pixels = image.getPrimaryPixels()
     size_z = pixels.getSizeZ()
     size_c = pixels.getSizeC()
@@ -130,44 +159,57 @@ Uses logging for status messages.
     if size_z < 1 or size_t < 1 or size_c < 1:
         logging.warning(
             f"Image {image.getName()} has invalid dimensions (Z:{size_z}, C:{size_c}, T:{size_t}). Cannot load planes.")
-        return None
+        return None, None
 
     selected_z_plane = random.randint(0, size_z - 1)
     selected_t_timepoint = random.randint(0, size_t - 1)
     s = f"t:{size_t} c:{size_c} z:{size_z} y:{size_y} x:{size_x} (selected t:{selected_t_timepoint} z:{selected_z_plane})"
     logging.info(s)
 
-    cropped_size_y = min(target_y_dim, size_y)
-    cropped_size_x = min(target_x_dim, size_x)
-    start_y = random.randint(0, size_y - cropped_size_y) if size_y > target_y_dim else 0
-    start_x = random.randint(0, size_x - cropped_size_x) if size_x > target_x_dim else 0
+    # Square crop so that resizing to MIN_SIZE x MIN_SIZE does not distort the image
+    crop_size = min(max_crop_size, size_x, size_y)
+    start_y = random.randint(0, size_y - crop_size)
+    start_x = random.randint(0, size_x - crop_size)
 
     loaded_planes = []
     logging.info(
-        f"Downloading image {image.getName()} (cropped region: X={start_x}-{start_x + cropped_size_x}, Y={start_y}-{start_y + cropped_size_y})")
+        f"Downloading image {image.getName()} (cropped region: X={start_x}-{start_x + crop_size}, Y={start_y}-{start_y + crop_size})")
     try:
         for c in range(size_c):
-            tile_coords_tuple = (start_x, start_y, cropped_size_x, cropped_size_y)
+            tile_coords_tuple = (start_x, start_y, crop_size, crop_size)
             plane_data = pixels.getTile(selected_z_plane, c, selected_t_timepoint, tile_coords_tuple)
             loaded_planes.append(plane_data)
         all_channels_cropped_data = np.stack(loaded_planes)
     except Exception as e:
         logging.error(f"Error loading cropped planes for image {image.getName()}: {e}")
-        return None
+        return None, None
 
-    final_shape = (1, size_c, 1, cropped_size_y, cropped_size_x)
-    return np.reshape(all_channels_cropped_data, newshape=final_shape)
+    crop_info = {
+        'z': selected_z_plane,
+        't': selected_t_timepoint,
+        'crop_x': start_x,
+        'crop_y': start_y,
+        'crop_size': crop_size,
+    }
+    return all_channels_cropped_data, crop_info
 
 
 def save_images(image: np.ndarray, filename: str, new_shape=None):
     if new_shape is not None:
         image = resize(image, new_shape, preserve_range=True)
-    iio.imwrite(filename, image, extension='.tif')
+    iio.imwrite(filename, image.astype(np.float32), extension='.tif')
     logging.info(f"Saved {filename}")
 
 
 def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel: np.ndarray,
                             crosstalk_coefficient: float) -> tuple[np.ndarray, float]:
+    """
+    Adds a scaled copy of the source channel to the target channel.
+
+    The source is scaled so that roughly crosstalk_coefficient of the total intensity of the
+    mixed image comes from the source. Returns the mixed image in the original (raw) intensity
+    units and the measured bleed-through proportion, or (None, 0.0) if the source is empty.
+    """
     if not (0.0 <= crosstalk_coefficient <= 1.0):
         logging.warning("Crosstalk coefficient is typically between 0 and 1.")
     if pure_target_channel.shape != pure_source_channel.shape:
@@ -182,17 +224,12 @@ def generate_crosstalk_data(pure_target_channel: np.ndarray, pure_source_channel
             sum_pure_source_channel * (1.0 - crosstalk_coefficient))
     bleed_through_signal = alpha * pure_source_channel
     mixed_target_channel = pure_target_channel + bleed_through_signal
-    current_max = np.max(mixed_target_channel)
-    if current_max == 0:
-        normalized_mixed_target_channel = np.zeros_like(mixed_target_channel)
-    else:
-        normalized_mixed_target_channel = mixed_target_channel * NORM_COEFF / current_max
     sum_mixed_target_channel = float(np.sum(mixed_target_channel))
     if sum_mixed_target_channel > 0.0:
         bleedthrough_proportion = float(np.sum(bleed_through_signal)) / sum_mixed_target_channel
     else:
         bleedthrough_proportion = 0.0
-    return normalized_mixed_target_channel / NORM_COEFF, bleedthrough_proportion
+    return mixed_target_channel, bleedthrough_proportion
 
 
 HOST = 'ws://idr.openmicroscopy.org/omero-ws'
@@ -200,6 +237,16 @@ USER = 'public'
 PASS = 'public'
 
 MAX_RETRIES = 1000  # Increased to handle duplicate avoidance
+
+
+def get_map_annotations(obj):
+    """Returns all key-value (map) annotations on an OMERO object as {key: [values]}."""
+    values = {}
+    for annotation in obj.listAnnotations():
+        if hasattr(annotation, 'getMapValue'):
+            for key_value_pair in annotation.getMapValue():
+                values.setdefault(key_value_pair.name, []).append(key_value_pair.value)
+    return values
 
 
 def has_imaging_method_annotation(obj, attribute_name="Imaging Method", search_terms=None):
@@ -217,16 +264,9 @@ def has_imaging_method_annotation(obj, attribute_name="Imaging Method", search_t
     if search_terms is None:
         search_terms = ["fluorescence", "confocal"]
 
-    kv_annotations = obj.listAnnotations()
-    for annotation in kv_annotations:
-        if hasattr(annotation, 'getMapValue'):
-            for key_value_pair in annotation.getMapValue():
-                key = key_value_pair.name
-                value = key_value_pair.value
-                if key == attribute_name:
-                    if any(term.lower() in value.lower() for term in search_terms):
-                        return True
-    return False
+    return any(term.lower() in value.lower()
+               for value in get_map_annotations(obj).get(attribute_name, [])
+               for term in search_terms)
 
 
 def is_valid_image(image):
@@ -326,6 +366,105 @@ def find_random_screen_image(conn):
     return None, None, None, None
 
 
+def pick_random_image(conn, worker_id):
+    """
+    Picks an unused image from either the Project or the Screen hierarchy at random.
+    Returns: (image, context dict describing where it came from), or (None, None).
+    """
+    if random.choice([0, 1]) == 0:
+        logging.info(f"Worker {worker_id}: Choosing image from Project hierarchy.")
+        study, container, image = find_random_project_image(conn)
+        if image is None:
+            return None, None
+        for obj in (study, container, image):
+            print_obj(obj)
+        well_id = ''
+        hierarchy = 'Project/Dataset'
+    else:
+        logging.info(f"Worker {worker_id}: Choosing image from Screen hierarchy.")
+        study, container, well, image = find_random_screen_image(conn)
+        if image is None:
+            return None, None
+        for obj in (study, container, well, image):
+            print_obj(obj)
+        well_id = well.getId()
+        hierarchy = 'Screen/Plate/Well'
+
+    study_annotations = get_map_annotations(study)
+    image_annotations = get_map_annotations(image)
+    context = {
+        'hierarchy': hierarchy,
+        'project_or_screen_id': study.getId(),
+        'project_or_screen_name': study.getName(),
+        'dataset_or_plate_id': container.getId(),
+        'dataset_or_plate_name': container.getName(),
+        'well_id': well_id,
+        'imaging_method': '; '.join(study_annotations.get('Imaging Method', [])),
+        'cell_line': '; '.join(image_annotations.get('Cell Line', [])),
+        'image_annotations': json.dumps(image_annotations),
+        'study_annotations': json.dumps(study_annotations),
+    }
+    return image, context
+
+
+def process_image(args, image, context):
+    """Generates, saves and records one mixed/source image pair. Returns True on success."""
+    data, crop_info = load_numpy_array(image)
+    if data is None:
+        logging.error("No image has been loaded - something has gone wrong somewhere!")
+        return False
+
+    source_channel, target_channel = random.sample(range(data.shape[0]), 2)
+    logging.info(f'Source Channel: {source_channel}')
+    logging.info(f'Target Channel: {target_channel}')
+
+    crosstalk_coefficient = random.random() * args.max_crosstalk
+    mixed_image, crosstalk_proportion = generate_crosstalk_data(
+        pure_target_channel=data[target_channel],
+        pure_source_channel=data[source_channel],
+        crosstalk_coefficient=crosstalk_coefficient
+    )
+    if mixed_image is None:
+        logging.warning(f"Source channel {source_channel} of image {image.getId()} is empty - skipping.")
+        return False
+
+    # Put both images on the same intensity scale so the pair can be compared directly
+    source_image = data[source_channel].astype(np.float64)
+    intensity_scale = float(max(np.max(mixed_image), np.max(source_image)))
+
+    mixed_filename = os.path.join(args.mixed_dir,
+                                  f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
+    source_filename = os.path.join(args.source_dir,
+                                   f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
+    save_images(mixed_image / intensity_scale, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
+    save_images(source_image / intensity_scale, source_filename, new_shape=[MIN_SIZE, MIN_SIZE])
+
+    pixels = image.getPrimaryPixels()
+    channel_labels = image.getChannelLabels() or []
+    append_metadata_row(args.metadata_csv, {
+        **context,
+        **crop_info,
+        'mixed_file': os.path.basename(mixed_filename),
+        'source_file': os.path.basename(source_filename),
+        'image_id': image.getId(),
+        'image_name': image.getName(),
+        'pixel_type': image.getPixelsType(),
+        'size_x': pixels.getSizeX(),
+        'size_y': pixels.getSizeY(),
+        'size_z': pixels.getSizeZ(),
+        'size_c': pixels.getSizeC(),
+        'size_t': pixels.getSizeT(),
+        'source_channel': source_channel,
+        'target_channel': target_channel,
+        'source_channel_name': channel_labels[source_channel] if source_channel < len(channel_labels) else '',
+        'target_channel_name': channel_labels[target_channel] if target_channel < len(channel_labels) else '',
+        'crosstalk_coefficient': crosstalk_coefficient,
+        'bleedthrough_proportion': crosstalk_proportion,
+        'intensity_scale': intensity_scale,
+    })
+    return True
+
+
 def worker_task(args, images_to_process, worker_id):
     if images_to_process == 0:
         return
@@ -342,62 +481,14 @@ def worker_task(args, images_to_process, worker_id):
         for i in range(images_to_process):
             logging.info(f'Worker {worker_id}: Processing image {i + 1} of {images_to_process}.')
 
-            image = None
-            # Randomly choose between Project hierarchy (0) and Screen hierarchy (1)
-            hierarchy_choice = random.choice([0, 1])
-
-            if hierarchy_choice == 0:
-                logging.info(f"Worker {worker_id}: Choosing image from Project hierarchy.")
-                random_project, random_dataset, random_image = find_random_project_image(conn)
-                if random_image:
-                    print_obj(random_project)
-                    print_obj(random_dataset)
-                    print_obj(random_image)
-                    image = random_image
-            else:
-                logging.info(f"Worker {worker_id}: Choosing image from Screen hierarchy.")
-                random_screen, random_plate, random_well, random_image = find_random_screen_image(conn)
-                if random_image:
-                    print_obj(random_screen)
-                    print_obj(random_plate)
-                    print_obj(random_well)
-                    print_obj(random_image)
-                    image = random_image
-
-            if image is not None:
-                data = load_numpy_array(image)
-                if data is not None:
-                    source_channel = random.choice(range(np.size(data[0], 0)))
-                    target_channel = source_channel
-                    while source_channel == target_channel:
-                        target_channel = random.choice(range(np.size(data[0], 0)))
-
-                    logging.info(f'Source Channel: {source_channel}')
-                    logging.info(f'Target Channel: {target_channel}')
-
-                    crosstalk_coefficients = [random.random() * args.max_crosstalk]
-                    for alpha in crosstalk_coefficients:
-                        mixed_image, crosstalk_proportion = generate_crosstalk_data(
-                            pure_target_channel=data[0, target_channel, 0],
-                            pure_source_channel=data[0, source_channel, 0],
-                            crosstalk_coefficient=alpha
-                        )
-                        if mixed_image is not None:
-                            mixed_filename = os.path.join(args.mixed_dir,
-                                                          f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_mixed.tif")
-                            source_filename = os.path.join(args.source_dir,
-                                                           f"image_{image.getId()}_alpha_{crosstalk_proportion:.2f}_source.tif")
-                            save_images(mixed_image, mixed_filename, new_shape=[MIN_SIZE, MIN_SIZE])
-                            logging.info(f'Generated and saved {mixed_filename} in {args.mixed_dir}')
-                            save_images(data[0, source_channel, 0] / NORM_COEFF, source_filename,
-                                        new_shape=[MIN_SIZE, MIN_SIZE])
-                            logging.info(f'Generated and saved {source_filename} in {args.source_dir}')
-                            successful_processes += 1
-                else:
-                    logging.error("No image has been loaded - something has gone wrong somewhere!")
-            else:
+            image, context = pick_random_image(conn, worker_id)
+            if image is None:
                 logging.warning(
                     f"Worker {worker_id}: Could not find a suitable unused image to process in this iteration.")
+                continue
+
+            if process_image(args, image, context):
+                successful_processes += 1
 
         logging.info(f"Worker {worker_id} completed. Successfully processed {successful_processes} images.")
 
@@ -413,21 +504,26 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--max_crosstalk', type=float, default=0.5,
                         help='Maximum relative crosstalk applied from source channel to bleed channel')
-    parser.add_argument('-b', '--mixed_dir', help='Directory to save generated "bleed-through" images')
-    parser.add_argument('-s', '--source_dir', help='Directory to save original "source" channel')
+    parser.add_argument('-b', '--mixed_dir', required=True, help='Directory to save generated "bleed-through" images')
+    parser.add_argument('-s', '--source_dir', required=True, help='Directory to save original "source" channel')
     parser.add_argument('-n', '--number_of_images', type=int, default=1,
                         help='Number of image sets to generate')
     parser.add_argument('-l', '--log_file', type=str, default='processing.log',
                         help='Path to the log file for detailed output')
+    parser.add_argument('-m', '--metadata_csv', type=str, default=None,
+                        help='CSV file to append per-image metadata to (default: metadata.csv in the mixed directory)')
     parser.add_argument('-p', '--skip-prepopulate', action='store_true',
                         help='Skip prepopulating used image IDs from existing files')
     args = parser.parse_args()
+    if args.metadata_csv is None:
+        args.metadata_csv = os.path.join(args.mixed_dir, 'metadata.csv')
 
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s',
                         handlers=[logging.FileHandler(args.log_file, mode='w')])
 
     print(f"Detailed logs are being written to {args.log_file}")
+    print(f"Per-image metadata is being appended to {args.metadata_csv}")
 
     # Clean/create output directories (MODIFIED: only clean if not prepopulating)
     if args.skip_prepopulate:

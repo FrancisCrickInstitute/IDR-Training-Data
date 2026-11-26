@@ -1,0 +1,25 @@
+[workspace]
+authors = ["Dave Barry <david.barry@crick.ac.uk>"]
+channels = ["conda-forge"]
+name = "IDR-Training-Data"
+platforms = ["win-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "<3.14"
+pixi-pycharm = ">=0.0.13,<0.0.14"
+# From conda-forge, not PyPI: PyPI only has a source build of zeroc-ice 3.6.5, which fails with modern MSVC
+omero-py = ">=5.22.1,<6"
+
+[pypi-dependencies]
+imageio = ">=2.38.2, <3"
+numpy = ">=2.5.5, <3"
+pillow = ">=13.0.0, <14"
+tqdm = ">=4.70.1, <5"
+scikit-image = ">=0.26.0, <0.27"
+requests = ">=2.34.2, <3"
+
+[environments]
+idr-training = ["default"]
