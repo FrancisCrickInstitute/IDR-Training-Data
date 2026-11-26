@@ -237,6 +237,7 @@ USER = 'public'
 PASS = 'public'
 
 MAX_RETRIES = 1000  # Increased to handle duplicate avoidance
+MAX_ATTEMPTS_PER_IMAGE = 10  # Images a worker may try (e.g. after server-side load failures) per pair it must save
 
 
 def get_map_annotations(obj):
@@ -466,8 +467,14 @@ def process_image(args, image, context):
 
 
 def worker_task(args, images_to_process, worker_id):
+    """
+    Keeps picking images until images_to_process pairs have been saved, or until
+    MAX_ATTEMPTS_PER_IMAGE * images_to_process attempts have been made.
+    Returns the number of pairs actually saved.
+    """
+    successful_processes = 0
     if images_to_process == 0:
-        return
+        return successful_processes
 
     logging.info(
         f"Worker {worker_id} starting. Assigned to process {images_to_process} images. Creating new connection...")
@@ -477,9 +484,12 @@ def worker_task(args, images_to_process, worker_id):
         conn.connect()
         conn.c.enableKeepAlive(60)
 
-        successful_processes = 0
-        for i in range(images_to_process):
-            logging.info(f'Worker {worker_id}: Processing image {i + 1} of {images_to_process}.')
+        max_attempts = images_to_process * MAX_ATTEMPTS_PER_IMAGE
+        attempts = 0
+        while successful_processes < images_to_process and attempts < max_attempts:
+            attempts += 1
+            logging.info(f'Worker {worker_id}: Attempt {attempts} '
+                         f'({successful_processes} of {images_to_process} pairs saved so far).')
 
             image, context = pick_random_image(conn, worker_id)
             if image is None:
@@ -490,6 +500,9 @@ def worker_task(args, images_to_process, worker_id):
             if process_image(args, image, context):
                 successful_processes += 1
 
+        if successful_processes < images_to_process:
+            logging.error(f"Worker {worker_id} gave up after {attempts} attempts: saved {successful_processes} "
+                          f"of {images_to_process} pairs.")
         logging.info(f"Worker {worker_id} completed. Successfully processed {successful_processes} images.")
 
     except Exception as e:
@@ -498,6 +511,7 @@ def worker_task(args, images_to_process, worker_id):
         if conn and conn.isConnected():
             conn.close()
             logging.info(f"Worker {worker_id} finished. Connection closed.")
+    return successful_processes
 
 
 if __name__ == '__main__':
@@ -518,6 +532,8 @@ if __name__ == '__main__':
     if args.metadata_csv is None:
         args.metadata_csv = os.path.join(args.mixed_dir, 'metadata.csv')
 
+    log_dir = os.path.dirname(os.path.abspath(args.log_file))
+    os.makedirs(log_dir, exist_ok=True)
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s',
                         handlers=[logging.FileHandler(args.log_file, mode='w')])
@@ -552,12 +568,13 @@ if __name__ == '__main__':
     print(f"Number of workers: {num_workers}")
     print(f"Work distribution: {work_items}")
 
+    total_saved = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(worker_task, args, count, i) for i, count in enumerate(work_items)]
 
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing images"):
             try:
-                future.result()
+                total_saved += future.result() or 0
             except Exception as e:
                 logging.exception("An exception from a thread was propagated.")
 
@@ -566,4 +583,6 @@ if __name__ == '__main__':
 
     print("\nAll tasks completed. Please check the log file for details.")
     print(f"Total execution time: {total_time:.2f} seconds")
-    print(f"Total unique images processed: {len(used_image_ids)}")
+    print(f"Image pairs saved: {total_saved} of {args.number_of_images} requested")
+    if total_saved < args.number_of_images:
+        print(f"WARNING: {args.number_of_images - total_saved} pair(s) could not be generated - see the log for errors.")

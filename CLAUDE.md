@@ -19,7 +19,7 @@ In particular, ask before you:
 
 ## Environment
 
-The project uses pixi (`pixi.toml`, environment `idr-training`). Use `pixi run --no-install …` for local checks, because a plain `pixi run` can trigger an install. Dave runs installs. There is no `python` on PATH.
+The project uses pixi (`pixi.toml`). Use `pixi run --no-install -e idr-training …`. `omero` is installed only in the `idr-training` environment, and a plain `pixi run` uses `default`, which doesn't have it. Without `--no-install`, `pixi run` may install packages, and installs are Dave's job. There is no `python` on PATH. omero's generated files print many `SyntaxWarning`s on import; they're harmless, and `python -W ignore::SyntaxWarning` silences them.
 
 `omero-py` must come from conda-forge (`[dependencies]` in `pixi.toml`), **not** PyPI. Its dependency `zeroc-ice==3.6.5` is source-only on PyPI and fails to compile with modern MSVC (`'binary_function': is not a member of 'std'`). conda-forge has prebuilt Windows builds for current Python versions, so you don't need an older Python. `environment.yml` and `requirements.txt` are older conda/pip setups.
 
@@ -34,7 +34,7 @@ The repo has no test suite, linter config or build step.
 Main generator (OMERO BlitzGateway, multithreaded):
 
 ```
-pixi run --no-install python generate-training-data.py -b <mixed_dir> -s <source_dir> -n <num_images> [-c 0.5] [-l processing.log] [-m metadata.csv] [-p]
+pixi run --no-install -e idr-training python generate-training-data.py -b <mixed_dir> -s <source_dir> -n <num_images> [-c 0.5] [-l processing.log] [-m metadata.csv] [-p]
 ```
 
 - One CSV row per generated pair is appended to `-m` (default `<mixed_dir>/metadata.csv`). It records the source study, container and well, imaging method, cell line, dimensions and pixel type, Z/T, the crop, channel indices and names, the input coefficient, the measured proportion, the intensity scale, and all image- and study-level map annotations as JSON.
@@ -51,6 +51,7 @@ Other scripts:
 ## Architecture notes
 
 - **Image selection** (`generate-training-data.py`): each worker picks either the Project→Dataset→Image or the Screen→Plate→Well→WellSample→Image hierarchy at random. A Project or Screen qualifies only if its map annotation `"Imaging Method"` contains "fluorescence" or "confocal" (`has_imaging_method_annotation`). An image qualifies only if it has more than one channel and X and Y larger than `MIN_SIZE` (256) (`is_valid_image`).
+- **Retries**: some IDR images fail to load on the server side (`ResourceError: Error instantiating pixel buffer`). A worker keeps picking new images until it has saved its quota, trying at most `MAX_ATTEMPTS_PER_IMAGE` × quota images. The run ends by printing pairs saved against pairs requested.
 - **Concurrency**: the script uses a `ThreadPoolExecutor` with up to `cpu_count*4` workers. Each worker opens its own `BlitzGateway` connection (public/public over `ws://…/omero-ws`). A global `used_image_ids` set, guarded by a lock, keeps images unique across threads.
 - **Loading**: `load_numpy_array` picks a random Z and T and a random **square** crop with side `min(1024, X, Y)`, so the resize to 256×256 doesn't distort the image. It fetches each channel with `pixels.getTile` and returns `(array of shape (C, S, S), crop_info)`.
 - **Cross-talk model**: in `generate-training-data.py`, `alpha` is scaled so that `crosstalk_coefficient` is the intended fraction of the summed mixed-image intensity that comes from bleed-through. `generate_crosstalk_data` returns the mixed image in raw units. `process_image` then divides the mixed and source images by the **same** scale (the larger of their two maxima, recorded as `intensity_scale` in the CSV) and saves both as float32. The notebook uses the simpler `coefficient * source` with the old per-image normalisation.
