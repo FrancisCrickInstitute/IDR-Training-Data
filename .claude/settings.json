@@ -49,9 +49,14 @@
       "Bash(pixi add *)",
       "Bash(pixi remove *)",
       "Bash(pixi update *)",
-      "Bash(pixi run python run.py *)",
+      "Bash(pixi run *generate-training-data.py*)",
+      "Bash(pixi run *generate_idr_image_list.py*)",
       "Bash(mv *)",
       "Bash(rm *)",
+      "Bash(git rm *)",
+      "Bash(git mv *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
       "PowerShell(git add *)",
       "PowerShell(git commit *)",
       "PowerShell(git push *)",
@@ -67,12 +72,24 @@
       "PowerShell(pixi add *)",
       "PowerShell(pixi remove *)",
       "PowerShell(pixi update *)",
-      "PowerShell(pixi run python run.py *)",
+      "PowerShell(pixi run *generate-training-data.py*)",
+      "PowerShell(pixi run *generate_idr_image_list.py*)",
       "PowerShell(Move-Item *)",
       "PowerShell(Remove-Item *)",
+      "PowerShell(git rm *)",
+      "PowerShell(git mv *)",
+      "PowerShell(curl *)",
+      "PowerShell(wget *)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(iwr *)",
+      "PowerShell(Invoke-RestMethod *)",
+      "PowerShell(irm *)",
       "Edit(pixi.toml)",
       "Edit(WORKING_AGREEMENT.md)",
-      "Edit(.claude/**)"
+      "Edit(.claude/**)",
+      "Write(pixi.toml)",
+      "Write(WORKING_AGREEMENT.md)",
+      "Write(.claude/**)"
     ],
     "deny": [
       "Bash(git push --force *)",
@@ -91,7 +108,8 @@
       "PowerShell(git branch -D *)",
       "PowerShell(Remove-Item -Recurse *)",
       "PowerShell(pixi clean *)",
-      "Edit(pixi.lock)"
+      "Edit(pixi.lock)",
+      "Write(pixi.lock)"
     ]
   }
 }

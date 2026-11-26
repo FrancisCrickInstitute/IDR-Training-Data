@@ -6,13 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Generates training data for detecting fluorescence channel cross-talk ("bleed-through"). Scripts pull random multi-channel fluorescence/confocal images from the public Image Data Resource (IDR, `idr.openmicroscopy.org`), pick a random source and target channel, add a random amount of the source channel into the target channel, and save the mixed target plus the original source channel as 256×256 TIFFs.
 
+## Working agreement
+
+Read `WORKING_AGREEMENT.md` before starting. It sets out what you may do without asking, what needs Dave's "yes" first, and what you must never do. `.claude/settings.json` enforces part of it.
+
+In particular, ask before you:
+- edit `pixi.toml` or run any `pixi install`, `add` or `lock`
+- move or delete files, including `git rm`
+- change git state
+- contact external servers, including IDR
+- start long runs of the generator
+
 ## Environment
 
-The project uses pixi (`pixi.toml`). Run everything through it, e.g. `pixi run python <script>.py`. There is no `python` on PATH.
+The project uses pixi (`pixi.toml`, environment `idr-training`). Use `pixi run --no-install …` for local checks, because a plain `pixi run` can trigger an install. Dave runs installs. There is no `python` on PATH.
 
-`omero-py` (with its `zeroc-ice` dependency) is **not** in `pixi.toml` yet, so scripts that import `omero` won't run in the pixi environment until it is added. `environment.yml` and `requirements.txt` are older conda/pip setups.
+`omero-py` must come from conda-forge (`[dependencies]` in `pixi.toml`), **not** PyPI. Its dependency `zeroc-ice==3.6.5` is source-only on PyPI and fails to compile with modern MSVC (`'binary_function': is not a member of 'std'`). conda-forge has prebuilt Windows builds for current Python versions, so you don't need an older Python. `environment.yml` and `requirements.txt` are older conda/pip setups.
 
-Syntax check without importing: `pixi run python -m py_compile <file>.py`.
+Syntax check without importing: `pixi run --no-install python -m py_compile <file>.py`.
 
 Raw pixels have to come through OMERO (BlitzGateway with `getTile`). IDR's public HTTP endpoints serve only display-rendered 8-bit images, and its pixel-tile and zarr paths are not available, so don't build an HTTP-only downloader.
 
@@ -23,7 +34,7 @@ The repo has no test suite, linter config or build step.
 Main generator (OMERO BlitzGateway, multithreaded):
 
 ```
-pixi run python generate-training-data.py -b <mixed_dir> -s <source_dir> -n <num_images> [-c 0.5] [-l processing.log] [-m metadata.csv] [-p]
+pixi run --no-install python generate-training-data.py -b <mixed_dir> -s <source_dir> -n <num_images> [-c 0.5] [-l processing.log] [-m metadata.csv] [-p]
 ```
 
 - One CSV row per generated pair is appended to `-m` (default `<mixed_dir>/metadata.csv`). It records the source study, container and well, imaging method, cell line, dimensions and pixel type, Z/T, the crop, channel indices and names, the input coefficient, the measured proportion, the intensity scale, and all image- and study-level map annotations as JSON.

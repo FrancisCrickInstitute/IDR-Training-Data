@@ -47,5 +47,5 @@ Sections 1–4 are generic and meant to be copied to other repos (or to `~/.clau
 
 ## 5. This project
 
-- **Local machine**: Windows (`win-64` is the only platform in `pixi.toml`). The pixi environment is `image-gen`; use `pixi run --no-install …` for local checks. Dave runs installs.
+- **Local machine**: Windows (`win-64` is the only platform in `pixi.toml`). The pixi environment is `idr-training`; use `pixi run --no-install …` for local checks. Dave runs installs.
 - **Output locations**: temporary files go in the scratchpad, not the repo.
