@@ -86,10 +86,7 @@
       "PowerShell(irm *)",
       "Edit(pixi.toml)",
       "Edit(WORKING_AGREEMENT.md)",
-      "Edit(.claude/**)",
-      "Write(pixi.toml)",
-      "Write(WORKING_AGREEMENT.md)",
-      "Write(.claude/**)"
+      "Edit(.claude/**)"
     ],
     "deny": [
       "Bash(git push --force *)",
@@ -108,8 +105,7 @@
       "PowerShell(git branch -D *)",
       "PowerShell(Remove-Item -Recurse *)",
       "PowerShell(pixi clean *)",
-      "Edit(pixi.lock)",
-      "Write(pixi.lock)"
+      "Edit(pixi.lock)"
     ]
   }
 }
